@@ -1,4 +1,4 @@
--- Revisión de la UI original: crea el panel completo con las doce pestañas originales.
+-- Revisión de la UI original: crea el panel completo con sus doce pestañas originales y Language al final.
 -- Coloca este LocalScript en StarterPlayerScripts después de instalar el ModuleScript.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Library = require(ReplicatedStorage:WaitForChild("ModernLiquidGlassLibrary"))
