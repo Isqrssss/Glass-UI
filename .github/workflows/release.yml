@@ -14,15 +14,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install Rojo
-        uses: rojo-rbx/setup-rojo@v1
-        with:
-          version: "7.5.1"
+      - name: Setup Aftman
+        uses: ok-nick/setup-aftman@v0.3.0
+      - name: Install pinned tools
+        run: aftman install
       - name: Build release files
         run: |
           mkdir -p dist
           rojo build default.project.json --output dist/ModernLiquidGlassLibrary.rbxm
-          zip -r dist/ModernLiquidGlassLibrary-source.zip README.md CHANGELOG.md .gitignore aftman.toml default.project.json src examples docs tests .github
+          zip -r dist/ModernLiquidGlassLibrary-source.zip .github .gitignore aftman.toml default.project.json src examples docs tests
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
