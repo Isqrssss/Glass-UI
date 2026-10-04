@@ -1,0 +1,2629 @@
+-- ModernLiquidGlass full standalone review example.
+-- Self-contained: embeds src/init.lua and its ConfigManager, Localization,
+-- and IconRegistry modules. It creates the original Liquid Glass UI plus a
+-- Review tab demonstrating each public control type. Callbacks only print.
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local LocalizationService = game:GetService("LocalizationService")
+local HttpService = game:GetService("HttpService")
+local ConfigManager = (function()
+-- Persistencia opcional para runtimes cliente con writefile/readfile/isfile.
+-- En Roblox Studio sin esas funciones, conserva el estado en memoria y no rompe la UI.
+local HttpService = game:GetService("HttpService")
+local ConfigManager = {}
+ConfigManager.__index = ConfigManager
+
+local function clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local result = {}
+    seen[value] = result
+    for key, item in pairs(value) do
+        result[clone(key, seen)] = clone(item, seen)
+    end
+    return result
+end
+
+local function resolveGlobal(name)
+    local environments = {}
+    pcall(function()
+        if type(getgenv) == "function" then
+            local env = getgenv()
+            if type(env) == "table" then table.insert(environments, env) end
+        end
+    end)
+    pcall(function()
+        if type(_G) == "table" then table.insert(environments, _G) end
+    end)
+    pcall(function()
+        if type(getfenv) == "function" then
+            local env = getfenv(0)
+            if type(env) == "table" then table.insert(environments, env) end
+        end
+    end)
+    for _, env in ipairs(environments) do
+        local value = rawget(env, name)
+        if type(value) == "function" then return value end
+    end
+    return nil
+end
+
+local function emptyProfile()
+    return { Controls = {}, Settings = {} }
+end
+
+function ConfigManager.new(filePath, debounceSeconds)
+    local self = setmetatable({}, ConfigManager)
+    self.Path = filePath or "ModernLiquidGlass.json"
+    self.DebounceSeconds = debounceSeconds or 0.45
+    self._readfile = resolveGlobal("readfile")
+    self._writefile = resolveGlobal("writefile")
+    self._isfile = resolveGlobal("isfile")
+    self._revision = 0
+    self._suspended = false
+    self.StorageAvailable = type(self._readfile) == "function"
+        and type(self._writefile) == "function"
+        and type(self._isfile) == "function"
+
+    self.Data = {
+        Version = 1,
+        ActiveProfile = "Default",
+        Profiles = { Default = emptyProfile() },
+    }
+
+    if self.StorageAvailable then
+        local ok, exists = pcall(self._isfile, self.Path)
+        if ok and exists then
+            local readOk, encoded = pcall(self._readfile, self.Path)
+            if readOk and type(encoded) == "string" then
+                local decodeOk, decoded = pcall(function()
+                    return HttpService:JSONDecode(encoded)
+                end)
+                if decodeOk and type(decoded) == "table" then
+                    if type(decoded.Profiles) == "table" then
+                        self.Data = decoded
+                    end
+                end
+            end
+        end
+    end
+
+    if type(self.Data.Profiles) ~= "table" then self.Data.Profiles = {} end
+    if type(self.Data.Profiles.Default) ~= "table" then
+        self.Data.Profiles.Default = emptyProfile()
+    end
+    if type(self.Data.ActiveProfile) ~= "string"
+        or type(self.Data.Profiles[self.Data.ActiveProfile]) ~= "table" then
+        self.Data.ActiveProfile = "Default"
+    end
+    for profileName, profile in pairs(self.Data.Profiles) do
+        if type(profile) ~= "table" then
+            self.Data.Profiles[profileName] = emptyProfile()
+        else
+            if type(profile.Controls) ~= "table" then profile.Controls = {} end
+            if type(profile.Settings) ~= "table" then profile.Settings = {} end
+        end
+    end
+    return self
+end
+
+function ConfigManager:_active()
+    local profile = self.Data.Profiles[self.Data.ActiveProfile]
+    if type(profile) ~= "table" then
+        profile = emptyProfile()
+        self.Data.Profiles[self.Data.ActiveProfile] = profile
+    end
+    profile.Controls = type(profile.Controls) == "table" and profile.Controls or {}
+    profile.Settings = type(profile.Settings) == "table" and profile.Settings or {}
+    return profile
+end
+
+function ConfigManager:GetControl(key, defaultValue)
+    local value = self:_active().Controls[key]
+    if value == nil then return defaultValue end
+    return clone(value)
+end
+
+function ConfigManager:SetControl(key, value)
+    if self._suspended then return end
+    self:_active().Controls[key] = clone(value)
+    self:ScheduleSave()
+end
+
+function ConfigManager:GetSetting(key, defaultValue)
+    local value = self:_active().Settings[key]
+    if value == nil then return defaultValue end
+    return clone(value)
+end
+
+function ConfigManager:SetSetting(key, value)
+    if self._suspended then return end
+    self:_active().Settings[key] = clone(value)
+    self:ScheduleSave()
+end
+
+function ConfigManager:SetSuspended(value)
+    self._suspended = value == true
+end
+
+function ConfigManager:ScheduleSave()
+    if self._suspended then return end
+    self._revision = self._revision + 1
+    local revision = self._revision
+    task.delay(self.DebounceSeconds, function()
+        if revision == self._revision then self:SaveNow() end
+    end)
+end
+
+function ConfigManager:SaveNow()
+    self._revision = self._revision + 1
+    if not self.StorageAvailable then
+        return false, "writefile/readfile/isfile are unavailable; keeping settings in memory"
+    end
+    local encodeOk, encoded = pcall(function()
+        return HttpService:JSONEncode(self.Data)
+    end)
+    if not encodeOk then return false, tostring(encoded) end
+    local writeOk, writeError = pcall(self._writefile, self.Path, encoded)
+    if not writeOk then return false, tostring(writeError) end
+    return true
+end
+
+function ConfigManager:GetProfileNames()
+    local names = {}
+    for name in pairs(self.Data.Profiles) do table.insert(names, name) end
+    table.sort(names)
+    return names
+end
+
+function ConfigManager:GetActiveProfile()
+    return self.Data.ActiveProfile
+end
+
+function ConfigManager:CreateProfile(name, copyActive)
+    if type(name) ~= "string" or name:match("^%s*$") then
+        return false, "Profile name must not be empty"
+    end
+    name = name:sub(1, 48)
+    if self.Data.Profiles[name] then return false, "Profile already exists" end
+    self.Data.Profiles[name] = copyActive and clone(self:_active()) or emptyProfile()
+    self.Data.ActiveProfile = name
+    self:ScheduleSave()
+    return true
+end
+
+function ConfigManager:SaveProfile(name)
+    if type(name) ~= "string" or name:match("^%s*$") then
+        return false, "Profile name must not be empty"
+    end
+    name = name:sub(1, 48)
+    self.Data.Profiles[name] = clone(self:_active())
+    self.Data.ActiveProfile = name
+    self:ScheduleSave()
+    return true
+end
+
+function ConfigManager:LoadProfile(name)
+    if type(name) ~= "string" or type(self.Data.Profiles[name]) ~= "table" then
+        return nil, "Profile not found"
+    end
+    self.Data.ActiveProfile = name
+    self:ScheduleSave()
+    return clone(self.Data.Profiles[name])
+end
+
+function ConfigManager:DeleteProfile(name)
+    if name == "Default" then return false, "The Default profile cannot be deleted" end
+    if type(self.Data.Profiles[name]) ~= "table" then return false, "Profile not found" end
+    self.Data.Profiles[name] = nil
+    if self.Data.ActiveProfile == name then self.Data.ActiveProfile = "Default" end
+    self:ScheduleSave()
+    return true
+end
+
+return ConfigManager
+end)()
+local Localization = (function()
+-- Localización integrada. Las claves no traducidas conservan el texto original y pueden añadirse desde la API.
+local Localization = {}
+
+Localization.Languages = {
+    { Code = "en", Name = "English" },
+    { Code = "es", Name = "Español" },
+    { Code = "pt", Name = "Português" },
+    { Code = "fr", Name = "Français" },
+    { Code = "de", Name = "Deutsch" },
+    { Code = "it", Name = "Italiano" },
+    { Code = "ru", Name = "Русский" },
+    { Code = "zh", Name = "中文（简体）" },
+    { Code = "ja", Name = "日本語" },
+    { Code = "ko", Name = "한국어" },
+    { Code = "ar", Name = "العربية" },
+    { Code = "tr", Name = "Türkçe" },
+}
+
+local names = {}
+for _, language in ipairs(Localization.Languages) do
+    names[language.Name] = language.Code
+end
+
+local dictionaries = {
+    es = {
+        Dashboard="Panel", Buttons="Botones", Toggles="Interruptores", Sliders="Deslizadores",
+        Inputs="Entradas", Dropdowns="Desplegables", Selectors="Selectores", Lists="Listas",
+        Cards="Tarjetas", Visuals="Visuales", Animations="Animaciones", Settings="Ajustes",
+        Language="Idioma", English="Inglés", ['Español']="Español", ['Português']="Portugués", ['Français']="Francés",
+        Deutsch="Alemán", Italiano="Italiano", ['Русский']="Ruso", ["中文（简体）"]="Chino simplificado",
+        ['日本語']="Japonés", ['한국어']="Coreano", ['العربية']="Árabe", ['Türkçe']="Turco",
+        ["Interface Language"]="Idioma de la interfaz", ["Select the interface language"]="Selecciona el idioma de la interfaz",
+        ["Detected from Roblox account language; you can change it here."]="Detectado desde el idioma de tu cuenta de Roblox; puedes cambiarlo aquí.",
+        ["Settings"]="Ajustes", ["Safe-Unload Framework"]="Descargar interfaz de forma segura",
+        ["Dynamic Keybind Active (G)"]="Atajo dinámico activo (G)", ["Primary System Action"]="Acción principal del sistema",
+        ["Ghost Action"]="Acción secundaria", ["Confirm Change"]="Confirmar cambio", ["Secondary Confirm"]="Confirmación secundaria",
+        ["Enable Canvas Overlays"]="Activar efectos de nieve", ["Snowfall"]="Nevada", ["Master Volume"]="Volumen principal",
+        ["Display Name"]="Nombre visible", ["Session Note"]="Nota de sesión", ["Quality Preset"]="Calidad",
+        ["Particle Renderer"]="Motor de partículas", ["Window Anchor"]="Posición de ventana",
+        ["Glass accent"]="Color del vidrio", ["Brightness"]="Brillo", ["Opacity"]="Opacidad",
+        ["Color and glass opacity"]="Color y opacidad del vidrio", ["Apply"]="Aplicar",
+    },
+    pt = {
+        Dashboard="Painel", Buttons="Botões", Toggles="Alternâncias", Sliders="Controles deslizantes",
+        Inputs="Entradas", Dropdowns="Menus suspensos", Selectors="Seletores", Lists="Listas",
+        Cards="Cartões", Visuals="Visuais", Animations="Animações", Settings="Configurações",
+        Language="Idioma", English="Inglês", ['Español']="Espanhol", ['Português']="Português", ['Français']="Francês",
+        Deutsch="Alemão", Italiano="Italiano", ['Русский']="Russo", ["中文（简体）"]="Chinês simplificado",
+        ['日本語']="Japonês", ['한국어']="Coreano", ['العربية']="Árabe", ['Türkçe']="Turco",
+        ["Interface Language"]="Idioma da interface", ["Select the interface language"]="Selecione o idioma da interface",
+        ["Detected from Roblox account language; you can change it here."]="Detectado pelo idioma da sua conta Roblox; você pode alterá-lo aqui.",
+        ["Safe-Unload Framework"]="Descarregar interface com segurança", ["Dynamic Keybind Active (G)"]="Atalho dinâmico ativo (G)",
+        ["Primary System Action"]="Ação principal do sistema", ["Ghost Action"]="Ação secundária", ["Confirm Change"]="Confirmar alteração",
+        ["Secondary Confirm"]="Confirmação secundária", ["Enable Canvas Overlays"]="Ativar efeitos de neve", ["Snowfall"]="Neve",
+        ["Master Volume"]="Volume principal", ["Display Name"]="Nome de exibição", ["Session Note"]="Nota da sessão",
+        ["Quality Preset"]="Qualidade", ["Particle Renderer"]="Renderizador de partículas", ["Window Anchor"]="Posição da janela",
+        ["Glass accent"]="Cor do vidro", ["Brightness"]="Brilho", ["Opacity"]="Opacidade",
+        ["Color and glass opacity"]="Cor e opacidade do vidro", ["Apply"]="Aplicar",
+    },
+    fr = {
+        Dashboard="Tableau de bord", Buttons="Boutons", Toggles="Interrupteurs", Sliders="Curseurs",
+        Inputs="Entrées", Dropdowns="Menus déroulants", Selectors="Sélecteurs", Lists="Listes",
+        Cards="Cartes", Visuals="Visuels", Animations="Animations", Settings="Paramètres",
+        Language="Langue", English="Anglais", ['Español']="Espagnol", ['Português']="Portugais", ['Français']="Français",
+        Deutsch="Allemand", Italiano="Italien", ['Русский']="Russe", ["中文（简体）"]="Chinois simplifié",
+        ['日本語']="Japonais", ['한국어']="Coréen", ['العربية']="Arabe", ['Türkçe']="Turc",
+        ["Interface Language"]="Langue de l’interface", ["Select the interface language"]="Choisissez la langue de l’interface",
+        ["Detected from Roblox account language; you can change it here."]="Détectée depuis la langue du compte Roblox ; modifiable ici.",
+        ["Safe-Unload Framework"]="Fermer l’interface proprement", ["Dynamic Keybind Active (G)"]="Raccourci dynamique actif (G)",
+        ["Primary System Action"]="Action principale", ["Ghost Action"]="Action secondaire", ["Confirm Change"]="Confirmer la modification",
+        ["Secondary Confirm"]="Confirmation secondaire", ["Enable Canvas Overlays"]="Activer les effets de neige", ["Snowfall"]="Neige",
+        ["Master Volume"]="Volume principal", ["Display Name"]="Nom affiché", ["Session Note"]="Note de session",
+        ["Quality Preset"]="Qualité", ["Particle Renderer"]="Rendu des particules", ["Window Anchor"]="Position de la fenêtre",
+        ["Glass accent"]="Couleur du verre", ["Brightness"]="Luminosité", ["Opacity"]="Opacité",
+        ["Color and glass opacity"]="Couleur et opacité du verre", ["Apply"]="Appliquer",
+    },
+    de = {
+        Dashboard="Übersicht", Buttons="Schaltflächen", Toggles="Umschalter", Sliders="Regler",
+        Inputs="Eingaben", Dropdowns="Auswahllisten", Selectors="Auswahlen", Lists="Listen",
+        Cards="Karten", Visuals="Visuals", Animations="Animationen", Settings="Einstellungen",
+        Language="Sprache", English="Englisch", ['Español']="Spanisch", ['Português']="Portugiesisch", ['Français']="Französisch",
+        Deutsch="Deutsch", Italiano="Italienisch", ['Русский']="Russisch", ["中文（简体）"]="Vereinfachtes Chinesisch",
+        ['日本語']="Japanisch", ['한국어']="Koreanisch", ['العربية']="Arabisch", ['Türkçe']="Türkisch",
+        ["Interface Language"]="Oberflächensprache", ["Select the interface language"]="Oberflächensprache auswählen",
+        ["Detected from Roblox account language; you can change it here."]="Aus der Roblox-Kontosprache erkannt; hier änderbar.",
+        ["Safe-Unload Framework"]="Oberfläche sicher schließen", ["Dynamic Keybind Active (G)"]="Dynamische Taste aktiv (G)",
+        ["Primary System Action"]="Primäre Systemaktion", ["Ghost Action"]="Sekundäre Aktion", ["Confirm Change"]="Änderung bestätigen",
+        ["Secondary Confirm"]="Sekundäre Bestätigung", ["Enable Canvas Overlays"]="Schneeeffekte aktivieren", ["Snowfall"]="Schneefall",
+        ["Master Volume"]="Hauptlautstärke", ["Display Name"]="Anzeigename", ["Session Note"]="Sitzungsnotiz",
+        ["Quality Preset"]="Qualität", ["Particle Renderer"]="Partikel-Renderer", ["Window Anchor"]="Fensterposition",
+        ["Glass accent"]="Glasfarbe", ["Brightness"]="Helligkeit", ["Opacity"]="Deckkraft",
+        ["Color and glass opacity"]="Glasfarbe und Deckkraft", ["Apply"]="Anwenden",
+    },
+    it = {
+        Dashboard="Pannello", Buttons="Pulsanti", Toggles="Interruttori", Sliders="Cursori",
+        Inputs="Input", Dropdowns="Menu a discesa", Selectors="Selettori", Lists="Elenchi",
+        Cards="Schede", Visuals="Visuali", Animations="Animazioni", Settings="Impostazioni",
+        Language="Lingua", English="Inglese", ['Español']="Spagnolo", ['Português']="Portoghese", ['Français']="Francese",
+        Deutsch="Tedesco", Italiano="Italiano", ['Русский']="Russo", ["中文（简体）"]="Cinese semplificato",
+        ['日本語']="Giapponese", ['한국어']="Coreano", ['العربية']="Arabo", ['Türkçe']="Turco",
+        ["Interface Language"]="Lingua dell’interfaccia", ["Select the interface language"]="Seleziona la lingua dell’interfaccia",
+        ["Detected from Roblox account language; you can change it here."]="Rilevata dalla lingua dell’account Roblox; puoi modificarla qui.",
+        ["Safe-Unload Framework"]="Chiudi interfaccia in sicurezza", ["Dynamic Keybind Active (G)"]="Tasto dinamico attivo (G)",
+        ["Primary System Action"]="Azione principale", ["Ghost Action"]="Azione secondaria", ["Confirm Change"]="Conferma modifica",
+        ["Secondary Confirm"]="Conferma secondaria", ["Enable Canvas Overlays"]="Attiva effetti neve", ["Snowfall"]="Nevicata",
+        ["Master Volume"]="Volume principale", ["Display Name"]="Nome visualizzato", ["Session Note"]="Nota sessione",
+        ["Quality Preset"]="Qualità", ["Particle Renderer"]="Renderer particelle", ["Window Anchor"]="Posizione finestra",
+        ["Glass accent"]="Colore del vetro", ["Brightness"]="Luminosità", ["Opacity"]="Opacità",
+        ["Color and glass opacity"]="Colore e opacità del vetro", ["Apply"]="Applica",
+    },
+    ru = {
+        Dashboard="Панель", Buttons="Кнопки", Toggles="Переключатели", Sliders="Ползунки",
+        Inputs="Поля ввода", Dropdowns="Списки", Selectors="Выбор", Lists="Списки элементов",
+        Cards="Карточки", Visuals="Визуальные эффекты", Animations="Анимации", Settings="Настройки",
+        Language="Язык", English="Английский", ['Español']="Испанский", ['Português']="Португальский", ['Français']="Французский",
+        Deutsch="Немецкий", Italiano="Итальянский", ['Русский']="Русский", ["中文（简体）"]="Упрощённый китайский",
+        ['日本語']="Японский", ['한국어']="Корейский", ['العربية']="Арабский", ['Türkçe']="Турецкий",
+        ["Interface Language"]="Язык интерфейса", ["Select the interface language"]="Выберите язык интерфейса",
+        ["Detected from Roblox account language; you can change it here."]="Определён по языку аккаунта Roblox; его можно изменить здесь.",
+        ["Safe-Unload Framework"]="Безопасно закрыть интерфейс", ["Dynamic Keybind Active (G)"]="Горячая клавиша активна (G)",
+        ["Primary System Action"]="Основное действие", ["Ghost Action"]="Дополнительное действие", ["Confirm Change"]="Подтвердить изменение",
+        ["Secondary Confirm"]="Дополнительное подтверждение", ["Enable Canvas Overlays"]="Включить снежные эффекты", ["Snowfall"]="Снегопад",
+        ["Master Volume"]="Общая громкость", ["Display Name"]="Отображаемое имя", ["Session Note"]="Заметка сессии",
+        ["Quality Preset"]="Качество", ["Particle Renderer"]="Рендер частиц", ["Window Anchor"]="Положение окна",
+        ["Glass accent"]="Цвет стекла", ["Brightness"]="Яркость", ["Opacity"]="Непрозрачность",
+        ["Color and glass opacity"]="Цвет и прозрачность стекла", ["Apply"]="Применить",
+    },
+    zh = {
+        Dashboard="仪表板", Buttons="按钮", Toggles="开关", Sliders="滑块",
+        Inputs="输入", Dropdowns="下拉菜单", Selectors="选择器", Lists="列表",
+        Cards="卡片", Visuals="视觉效果", Animations="动画", Settings="设置",
+        Language="语言", English="英语", ['Español']="西班牙语", ['Português']="葡萄牙语", ['Français']="法语",
+        Deutsch="德语", Italiano="意大利语", ['Русский']="俄语", ["中文（简体）"]="简体中文",
+        ['日本語']="日语", ['한국어']="韩语", ['العربية']="阿拉伯语", ['Türkçe']="土耳其语",
+        ["Interface Language"]="界面语言", ["Select the interface language"]="选择界面语言",
+        ["Detected from Roblox account language; you can change it here."]="根据 Roblox 账户语言检测；可在此更改。",
+        ["Safe-Unload Framework"]="安全关闭界面", ["Dynamic Keybind Active (G)"]="动态快捷键已启用 (G)",
+        ["Primary System Action"]="主要操作", ["Ghost Action"]="次要操作", ["Confirm Change"]="确认更改",
+        ["Secondary Confirm"]="次要确认", ["Enable Canvas Overlays"]="启用飘雪效果", ["Snowfall"]="飘雪",
+        ["Master Volume"]="主音量", ["Display Name"]="显示名称", ["Session Note"]="会话备注",
+        ["Quality Preset"]="画质", ["Particle Renderer"]="粒子渲染器", ["Window Anchor"]="窗口位置",
+        ["Glass accent"]="玻璃颜色", ["Brightness"]="亮度", ["Opacity"]="不透明度",
+        ["Color and glass opacity"]="玻璃颜色与透明度", ["Apply"]="应用",
+    },
+    ja = {
+        Dashboard="ダッシュボード", Buttons="ボタン", Toggles="トグル", Sliders="スライダー",
+        Inputs="入力", Dropdowns="ドロップダウン", Selectors="セレクター", Lists="リスト",
+        Cards="カード", Visuals="ビジュアル", Animations="アニメーション", Settings="設定",
+        Language="言語", English="英語", ['Español']="スペイン語", ['Português']="ポルトガル語", ['Français']="フランス語",
+        Deutsch="ドイツ語", Italiano="イタリア語", ['Русский']="ロシア語", ["中文（简体）"]="簡体字中国語",
+        ['日本語']="日本語", ['한국어']="韓国語", ['العربية']="アラビア語", ['Türkçe']="トルコ語",
+        ["Interface Language"]="インターフェース言語", ["Select the interface language"]="表示言語を選択",
+        ["Detected from Roblox account language; you can change it here."]="Robloxアカウントの言語から検出。ここで変更できます。",
+        ["Safe-Unload Framework"]="UIを安全に終了", ["Dynamic Keybind Active (G)"]="ショートカット有効 (G)",
+        ["Primary System Action"]="メイン操作", ["Ghost Action"]="サブ操作", ["Confirm Change"]="変更を確定",
+        ["Secondary Confirm"]="追加確認", ["Enable Canvas Overlays"]="雪の演出を有効化", ["Snowfall"]="雪",
+        ["Master Volume"]="マスター音量", ["Display Name"]="表示名", ["Session Note"]="セッションメモ",
+        ["Quality Preset"]="画質", ["Particle Renderer"]="パーティクル描画", ["Window Anchor"]="ウィンドウ位置",
+        ["Glass accent"]="ガラスの色", ["Brightness"]="明るさ", ["Opacity"]="不透明度",
+        ["Color and glass opacity"]="ガラスの色と不透明度", ["Apply"]="適用",
+    },
+    ko = {
+        Dashboard="대시보드", Buttons="버튼", Toggles="토글", Sliders="슬라이더",
+        Inputs="입력", Dropdowns="드롭다운", Selectors="선택기", Lists="목록",
+        Cards="카드", Visuals="시각 효과", Animations="애니메이션", Settings="설정",
+        Language="언어", English="영어", ['Español']="스페인어", ['Português']="포르투갈어", ['Français']="프랑스어",
+        Deutsch="독일어", Italiano="이탈리아어", ['Русский']="러시아어", ["中文（简体）"]="중국어 간체",
+        ['日本語']="일본어", ['한국어']="한국어", ['العربية']="아랍어", ['Türkçe']="터키어",
+        ["Interface Language"]="인터페이스 언어", ["Select the interface language"]="인터페이스 언어 선택",
+        ["Detected from Roblox account language; you can change it here."]="Roblox 계정 언어에서 감지됨. 여기서 변경할 수 있습니다.",
+        ["Safe-Unload Framework"]="UI 안전하게 닫기", ["Dynamic Keybind Active (G)"]="동적 단축키 활성화 (G)",
+        ["Primary System Action"]="기본 작업", ["Ghost Action"]="보조 작업", ["Confirm Change"]="변경 확인",
+        ["Secondary Confirm"]="보조 확인", ["Enable Canvas Overlays"]="눈 효과 켜기", ["Snowfall"]="눈 내리기",
+        ["Master Volume"]="마스터 볼륨", ["Display Name"]="표시 이름", ["Session Note"]="세션 메모",
+        ["Quality Preset"]="품질 설정", ["Particle Renderer"]="파티클 렌더러", ["Window Anchor"]="창 위치",
+        ["Glass accent"]="유리 색상", ["Brightness"]="밝기", ["Opacity"]="불투명도",
+        ["Color and glass opacity"]="유리 색상 및 불투명도", ["Apply"]="적용",
+    },
+    ar = {
+        Dashboard="لوحة المعلومات", Buttons="الأزرار", Toggles="مفاتيح التبديل", Sliders="أشرطة التمرير",
+        Inputs="المدخلات", Dropdowns="القوائم المنسدلة", Selectors="المحددات", Lists="القوائم",
+        Cards="البطاقات", Visuals="المظاهر", Animations="الحركات", Settings="الإعدادات",
+        Language="اللغة", English="الإنجليزية", ['Español']="الإسبانية", ['Português']="البرتغالية", ['Français']="الفرنسية",
+        Deutsch="الألمانية", Italiano="الإيطالية", ['Русский']="الروسية", ["中文（简体）"]="الصينية المبسطة",
+        ['日本語']="اليابانية", ['한국어']="الكورية", ['العربية']="العربية", ['Türkçe']="التركية",
+        ["Interface Language"]="لغة الواجهة", ["Select the interface language"]="اختر لغة الواجهة",
+        ["Detected from Roblox account language; you can change it here."]="تم اكتشافها من لغة حساب Roblox؛ يمكنك تغييرها هنا.",
+        ["Safe-Unload Framework"]="إغلاق الواجهة بأمان", ["Dynamic Keybind Active (G)"]="الاختصار الديناميكي نشط (G)",
+        ["Primary System Action"]="الإجراء الرئيسي", ["Ghost Action"]="إجراء ثانوي", ["Confirm Change"]="تأكيد التغيير",
+        ["Secondary Confirm"]="تأكيد ثانوي", ["Enable Canvas Overlays"]="تفعيل تأثيرات الثلج", ["Snowfall"]="تساقط الثلج",
+        ["Master Volume"]="مستوى الصوت الرئيسي", ["Display Name"]="اسم العرض", ["Session Note"]="ملاحظة الجلسة",
+        ["Quality Preset"]="الجودة", ["Particle Renderer"]="عارض الجسيمات", ["Window Anchor"]="موضع النافذة",
+        ["Glass accent"]="لون الزجاج", ["Brightness"]="السطوع", ["Opacity"]="العتامة",
+        ["Color and glass opacity"]="لون الزجاج وشفافيته", ["Apply"]="تطبيق",
+    },
+    tr = {
+        Dashboard="Kontrol Paneli", Buttons="Düğmeler", Toggles="Anahtarlar", Sliders="Kaydırıcılar",
+        Inputs="Girdiler", Dropdowns="Açılır Menüler", Selectors="Seçiciler", Lists="Listeler",
+        Cards="Kartlar", Visuals="Görseller", Animations="Animasyonlar", Settings="Ayarlar",
+        Language="Dil", English="İngilizce", ['Español']="İspanyolca", ['Português']="Portekizce", ['Français']="Fransızca",
+        Deutsch="Almanca", Italiano="İtalyanca", ['Русский']="Rusça", ["中文（简体）"]="Basitleştirilmiş Çince",
+        ['日本語']="Japonca", ['한국어']="Korece", ['العربية']="Arapça", ['Türkçe']="Türkçe",
+        ["Interface Language"]="Arayüz dili", ["Select the interface language"]="Arayüz dilini seçin",
+        ["Detected from Roblox account language; you can change it here."]="Roblox hesap dilinden algılandı; buradan değiştirebilirsiniz.",
+        ["Safe-Unload Framework"]="Arayüzü güvenle kapat", ["Dynamic Keybind Active (G)"]="Dinamik kısayol etkin (G)",
+        ["Primary System Action"]="Birincil sistem işlemi", ["Ghost Action"]="İkincil işlem", ["Confirm Change"]="Değişikliği onayla",
+        ["Secondary Confirm"]="İkincil onay", ["Enable Canvas Overlays"]="Kar efektlerini etkinleştir", ["Snowfall"]="Kar yağışı",
+        ["Master Volume"]="Ana ses düzeyi", ["Display Name"]="Görünen ad", ["Session Note"]="Oturum notu",
+        ["Quality Preset"]="Kalite", ["Particle Renderer"]="Parçacık oluşturucu", ["Window Anchor"]="Pencere konumu",
+        ["Glass accent"]="Cam rengi", ["Brightness"]="Parlaklık", ["Opacity"]="Opaklık",
+        ["Color and glass opacity"]="Cam rengi ve opaklığı", ["Apply"]="Uygula",
+    },
+}
+
+local localeAliases = {
+    en="en", es="es", pt="pt", fr="fr", de="de", it="it", ru="ru",
+    zh="zh", ja="ja", ko="ko", ar="ar", tr="tr",
+}
+
+function Localization.Normalize(code)
+    if type(code) ~= "string" then return "en" end
+    local prefix = code:lower():match("^([a-z]+)")
+    return localeAliases[prefix] or "en"
+end
+
+function Localization.DetectLanguage(robloxLocaleId)
+    return Localization.Normalize(robloxLocaleId)
+end
+
+function Localization.GetName(code)
+    code = Localization.Normalize(code)
+    for _, language in ipairs(Localization.Languages) do
+        if language.Code == code then return language.Name end
+    end
+    return "English"
+end
+
+function Localization.GetCodeForName(name)
+    return names[name] or "en"
+end
+
+function Localization.Translate(code, text)
+    if type(text) ~= "string" then return text end
+    code = Localization.Normalize(code)
+    return (dictionaries[code] and dictionaries[code][text]) or text
+end
+
+function Localization.RegisterTranslations(code, translations)
+    code = Localization.Normalize(code)
+    if type(translations) ~= "table" then return false end
+    dictionaries[code] = dictionaries[code] or {}
+    for key, value in pairs(translations) do
+        if type(key) == "string" and type(value) == "string" then
+            dictionaries[code][key] = value
+        end
+    end
+    return true
+end
+
+function Localization.GetNames()
+    local result = {}
+    for _, language in ipairs(Localization.Languages) do table.insert(result, language.Name) end
+    return result
+end
+
+return Localization
+end)()
+local IconRegistry = (function()
+-- Adaptador de fuentes de iconos. No descarga código ni recursos remotos por su cuenta.
+local IconRegistry = { Providers = {} }
+
+local function normalize(name)
+    return tostring(name or ""):lower():gsub("[%s_%-]", "")
+end
+
+local function asAssetId(value)
+    local text = tostring(value or "")
+    if text:match("^rbxassetid://%d+$") or text:match("^rbxasset://") then return text end
+    local digits = text:match("^(%d+)$")
+    if digits then return "rbxassetid://" .. digits end
+    return nil
+end
+
+IconRegistry.Providers.glyph = function(value)
+    return { Kind = "Text", Value = tostring(value or "•") }
+end
+IconRegistry.Providers.robloxasset = function(value)
+    local assetId = asAssetId(value)
+    if not assetId then return nil, "Expected a Roblox asset id or rbxassetid:// URL" end
+    return { Kind = "Image", Value = assetId }
+end
+IconRegistry.Providers.assetid = IconRegistry.Providers.robloxasset
+IconRegistry.Providers.lucide = function(value)
+    if type(value) == "table" then value = value.AssetId or value.Id or value.Asset end
+    return IconRegistry.Providers.robloxasset(value)
+end
+IconRegistry.Providers.robloxfont = IconRegistry.Providers.glyph
+
+function IconRegistry.RegisterProvider(name, resolver)
+    if type(name) ~= "string" or name == "" or type(resolver) ~= "function" then
+        return false, "RegisterProvider expects a name and resolver function"
+    end
+    IconRegistry.Providers[normalize(name)] = resolver
+    return true
+end
+
+function IconRegistry.Resolve(source, value)
+    local provider = IconRegistry.Providers[normalize(source)]
+    if not provider then return nil, "Unknown icon provider: " .. tostring(source) end
+    local ok, result, err = pcall(provider, value)
+    if not ok then return nil, tostring(result) end
+    if not result then return nil, err or "Icon provider returned no icon" end
+    if result.Kind ~= "Image" and result.Kind ~= "Text" then
+        return nil, "Icon provider must return Kind='Image' or Kind='Text'"
+    end
+    return result
+end
+
+return IconRegistry
+end)()
+
+local LiquidGlassUI = {}
+LiquidGlassUI.__index = LiquidGlassUI
+LiquidGlassUI.Version = "1.1.0-original-plus-core"
+
+function LiquidGlassUI.new(options)
+    options = options or {}
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+--==================================================
+-- CONFIGURATION
+--==================================================
+local GUI_NAME = options.Name or "ModernLiquidGlass"
+local TOGGLE_ACTION = "ToggleLiquidGlassUI_" .. GUI_NAME
+local safeFileName = tostring(options.ConfigName or GUI_NAME):gsub("[^%w%-_]", "_")
+local AutoConfig = ConfigManager.new(options.ConfigFile or (safeFileName .. ".json"), options.SaveDebounce)
+local AccountLanguage = "en"
+pcall(function() AccountLanguage = LocalizationService.RobloxLocaleId end)
+local function ResolveLanguage(value)
+    local namedCode = Localization.GetCodeForName(value)
+    if namedCode ~= "en" or value == "English" then return namedCode end
+    return Localization.Normalize(value)
+end
+local CurrentLanguage = ResolveLanguage(AutoConfig:GetSetting("Language", options.Language or AccountLanguage))
+local SuppressLanguagePersist = false
+local ThemeTargets = {}
+local TextRegistry = setmetatable({}, { __mode = "k" })
+local PlaceholderRegistry = setmetatable({}, { __mode = "k" })
+local ControlState = {}
+local ControlDefaults = {}
+local function Translate(text) return Localization.Translate(CurrentLanguage, text) end
+local function SetLocalizedText(object, text)
+    if object and type(text) == "string" then
+        TextRegistry[object] = text
+        object.Text = Translate(text)
+    end
+end
+local function RegisterThemeTarget(object, property, kind, baseColor)
+    if typeof(baseColor) == "Color3" then
+        table.insert(ThemeTargets, { Object = object, Property = property, Kind = kind, Base = baseColor })
+    end
+end
+local function RefreshLocalization()
+    for object, original in pairs(TextRegistry) do
+        if object and object.Parent then object.Text = Translate(original) end
+    end
+    for object, original in pairs(PlaceholderRegistry) do
+        if object and object.Parent then object.PlaceholderText = Translate(original) end
+    end
+end
+
+local DEFAULT_BLUE = Color3.fromRGB(45, 145, 255)
+local DEFAULT_BLUE_LIGHT = Color3.fromRGB(95, 185, 255)
+local WHITE = Color3.fromRGB(245, 249, 255)
+local function colorFromTable(value)
+    if typeof(value) == "Color3" then return value end
+    if type(value) ~= "table" then return nil end
+    local r, g, b = tonumber(value.R or value.r), tonumber(value.G or value.g), tonumber(value.B or value.b)
+    if not r or not g or not b then return nil end
+    return Color3.new(math.clamp(r, 0, 1), math.clamp(g, 0, 1), math.clamp(b, 0, 1))
+end
+local DefaultAccentColor = (typeof(options.AccentColor) == "Color3" and options.AccentColor) or DEFAULT_BLUE
+local savedAccent = (typeof(options.AccentColor) == "Color3" and options.AccentColor)
+    or colorFromTable(AutoConfig:GetSetting("AccentColor"))
+local BLUE = savedAccent or DEFAULT_BLUE
+local BLUE_LIGHT = BLUE == DEFAULT_BLUE and DEFAULT_BLUE_LIGHT or BLUE:Lerp(WHITE, 0.34)
+local HasSavedAccent = savedAccent ~= nil
+local CurrentGlassAlpha = math.clamp(tonumber(AutoConfig:GetSetting("GlassAlpha", options.GlassAlpha or 0.82)) or 0.82, 0.2, 1)
+local TEXT_SECONDARY = Color3.fromRGB(165, 177, 195)
+local GLASS = Color3.fromRGB(15, 22, 34)
+local GLASS_LIGHT = Color3.fromRGB(35, 48, 68)
+local MATTE_BLACK = Color3.fromRGB(20, 20, 25)
+
+local MIN_WIDTH, MIN_HEIGHT = 310, 320
+local MAX_WIDTH, MAX_HEIGHT = 850, 620
+
+--==================================================
+-- INSTANCE CLEANUP & ANTI-LEAK
+--==================================================
+local old = PlayerGui:FindFirstChild(GUI_NAME)
+if old then
+    old:Destroy()
+end
+
+local oldBlur = Lighting:FindFirstChild("ModernLiquidGlassBlur")
+if oldBlur then
+    oldBlur:Destroy()
+end
+
+local Janitor = { Connections = {} }
+local CloseUI, OpenUI, Unload
+
+
+
+function Janitor:Add(conn)
+    table.insert(self.Connections, conn)
+end
+
+function Janitor:Clean()
+    for _, conn in ipairs(self.Connections) do
+        if conn then
+            conn:Disconnect()
+        end
+    end
+    self.Connections = {}
+end
+
+--==================================================
+-- INTERPOLATION & SPRING PHYSICS HELPERS
+--==================================================
+local function Create(className, properties, parent)
+    properties = properties or {}
+    local originalText = properties.Text
+    local originalPlaceholder = properties.PlaceholderText
+    if type(originalText) == "string" then properties.Text = Translate(originalText) end
+    if type(originalPlaceholder) == "string" then properties.PlaceholderText = Translate(originalPlaceholder) end
+    local object = Instance.new(className)
+    for prop, val in pairs(properties) do
+        object[prop] = val
+    end
+    if type(originalText) == "string" then TextRegistry[object] = originalText end
+    if type(originalPlaceholder) == "string" then PlaceholderRegistry[object] = originalPlaceholder end
+    local background = properties.BackgroundColor3
+    local textColor = properties.TextColor3
+    local imageColor = properties.ImageColor3
+    if background == BLUE then RegisterThemeTarget(object, "BackgroundColor3", "accent", background)
+    elseif background == BLUE_LIGHT then RegisterThemeTarget(object, "BackgroundColor3", "light", background) end
+    if textColor == BLUE then RegisterThemeTarget(object, "TextColor3", "accent", textColor)
+    elseif textColor == BLUE_LIGHT then RegisterThemeTarget(object, "TextColor3", "light", textColor)
+    elseif typeof(textColor) == "Color3" then RegisterThemeTarget(object, "TextColor3", "text", textColor) end
+    if imageColor == BLUE then RegisterThemeTarget(object, "ImageColor3", "accent", imageColor)
+    elseif imageColor == BLUE_LIGHT then RegisterThemeTarget(object, "ImageColor3", "light", imageColor) end
+    object.Parent = parent
+    return object
+end
+
+local function Corner(object, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius)
+    corner.Parent = object
+    return corner
+end
+
+local function Stroke(object, transparency, thickness)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(210, 235, 255)
+    RegisterThemeTarget(stroke, "Color", "stroke", stroke.Color)
+    stroke.Transparency = transparency or 0.8
+    stroke.Thickness = thickness or 1
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = object
+    return stroke
+end
+
+local function FrameSafeLerp(start, target, alpha, dt)
+    local compl = 1 - math.exp(-alpha * (dt * 60))
+    if type(start) == "number" then
+        return start + (target - start) * compl
+    elseif typeof(start) == "UDim2" then
+        return UDim2.new(
+            start.X.Scale + (target.X.Scale - start.X.Scale) * compl,
+            start.X.Offset + (target.X.Offset - start.X.Offset) * compl,
+            start.Y.Scale + (target.Y.Scale - start.Y.Scale) * compl,
+            start.Y.Offset + (target.Y.Offset - start.Y.Offset) * compl
+        )
+    end
+    return target
+end
+
+local function Animate(object, properties, duration, style, direction)
+    local tween = TweenService:Create(
+        object,
+        TweenInfo.new(
+            duration or 0.2,
+            style or Enum.EasingStyle.Quart,
+            direction or Enum.EasingDirection.Out
+        ),
+        properties
+    )
+    tween:Play()
+    return tween
+end
+
+--==================================================
+-- RECT CORE STRUCTS
+--==================================================
+local Blur = Create("BlurEffect", {
+    Name = "ModernLiquidGlassBlur",
+    Size = 14,
+    Enabled = true,
+}, Lighting)
+
+local Screen = Create("ScreenGui", {
+    Name = GUI_NAME,
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 100,
+}, PlayerGui)
+
+local WindowScale = Create("UIScale", { Scale = 1 })
+
+local function fromUDim2Data(data)
+    if type(data) ~= "table" then return nil end
+    local xs, xo, ys, yo = tonumber(data.XScale), tonumber(data.XOffset), tonumber(data.YScale), tonumber(data.YOffset)
+    if not xs or not xo or not ys or not yo then return nil end
+    return UDim2.new(xs, xo, ys, yo)
+end
+local restoredPosition = fromUDim2Data(AutoConfig:GetSetting("WindowPosition"))
+local restoredSize = fromUDim2Data(AutoConfig:GetSetting("WindowSize"))
+local DefaultWindowPosition = options.Position or UDim2.fromScale(0.5, 0.5)
+local DefaultWindowSize = options.Size or UDim2.fromOffset(650, 430)
+local Window = Create("Frame", {
+    Name = "Window",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = options.Position or restoredPosition or DefaultWindowPosition,
+    Size = options.Size or restoredSize or DefaultWindowSize,
+    BackgroundColor3 = GLASS:Lerp(BLUE, HasSavedAccent and 0.05 or 0),
+    BackgroundTransparency = 1 - CurrentGlassAlpha,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+    ZIndex = 10,
+    Visible = true,
+}, Screen)
+WindowScale.Parent = Window
+Corner(Window, 24)
+Stroke(Window, 0.72, 1)
+
+Create("UISizeConstraint", {
+    MinSize = Vector2.new(MIN_WIDTH, MIN_HEIGHT),
+    MaxSize = Vector2.new(MAX_WIDTH, MAX_HEIGHT),
+}, Window)
+
+local SnowCanvas = Create("Frame", {
+    Name = "SnowCanvas",
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+    ClipsDescendants = false,
+    ZIndex = 1,
+}, Screen)
+
+local GlassHighlight = Create("Frame", {
+    Name = "GlassHighlight",
+    Size = UDim2.new(1, 0, 0, 100),
+    BackgroundColor3 = Color3.fromRGB(120, 190, 255),
+    BackgroundTransparency = 0.96,
+    BorderSizePixel = 0,
+    ZIndex = 11,
+}, Window)
+Corner(GlassHighlight, 24)
+
+local TopLight = Create("Frame", {
+    Size = UDim2.new(0.65, 0, 0, 2),
+    Position = UDim2.new(0.175, 0, 0, 0),
+    BackgroundColor3 = BLUE_LIGHT,
+    BackgroundTransparency = 0.15,
+    BorderSizePixel = 0,
+    ZIndex = 100,
+}, Window)
+Corner(TopLight, 10)
+
+local Header = Create("Frame", {
+    Name = "Header",
+    Size = UDim2.new(1, 0, 0, 72),
+    BackgroundColor3 = GLASS_LIGHT,
+    BackgroundTransparency = 0.58,
+    BorderSizePixel = 0,
+    ZIndex = 30,
+}, Window)
+Corner(Header, 23)
+
+local DragArea = Create("TextButton", {
+    Name = "DragArea",
+    Size = UDim2.new(1, -70, 1, 0),
+    BackgroundTransparency = 1,
+    Text = "",
+    AutoButtonColor = false,
+    Active = true,
+    ZIndex = 200,
+}, Header)
+
+--==================================================
+-- LOGO REDESIGN & MODERN BRANDING
+--==================================================
+local LogoHolder = Create("Frame", {
+    Name = "LogoHolder",
+    Size = UDim2.fromOffset(44, 44),
+    Position = UDim2.fromOffset(14, 14),
+    BackgroundColor3 = MATTE_BLACK,
+    BackgroundTransparency = 0,
+    BorderSizePixel = 0,
+    ZIndex = 50,
+}, Header)
+Corner(LogoHolder, 12)
+Stroke(LogoHolder, 0.85, 1)
+
+local LogoGlow = Create("Frame", {
+    Size = UDim2.new(1, 10, 1, 10),
+    Position = UDim2.fromOffset(-5, -5),
+    BackgroundColor3 = BLUE,
+    BackgroundTransparency = 0.95,
+    BorderSizePixel = 0,
+    ZIndex = 49,
+}, LogoHolder)
+Corner(LogoGlow, 15)
+
+local LogoText = Create("TextLabel", {
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+    Text = options.LogoText or "X",
+    TextColor3 = WHITE,
+    TextSize = 18,
+    Font = Enum.Font.GothamBold,
+    ZIndex = 52,
+}, LogoHolder)
+
+Create("TextLabel", {
+    Size = UDim2.new(1, -190, 0, 26),
+    Position = UDim2.fromOffset(72, 12),
+    BackgroundTransparency = 1,
+    Text = options.Title or "Liquid Glass",
+    TextColor3 = WHITE,
+    TextSize = 18,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 50,
+}, Header)
+
+Create("TextLabel", {
+    Size = UDim2.new(1, -190, 0, 18),
+    Position = UDim2.fromOffset(73, 39),
+    BackgroundTransparency = 1,
+    Text = options.Subtitle or "Modern interface",
+    TextColor3 = TEXT_SECONDARY,
+    TextSize = 9,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 50,
+}, Header)
+
+local Status = Create("Frame", {
+    Size = UDim2.fromOffset(7, 7),
+    Position = UDim2.new(1, -93, 0, 22),
+    BackgroundColor3 = BLUE_LIGHT,
+    BorderSizePixel = 0,
+    ZIndex = 60,
+}, Header)
+Corner(Status, 10)
+
+local Close = Create("TextButton", {
+    Name = "Close",
+    Size = UDim2.fromOffset(42, 42),
+    Position = UDim2.new(1, -55, 0, 15),
+    BackgroundColor3 = WHITE,
+    BackgroundTransparency = 0.91,
+    BorderSizePixel = 0,
+    Text = "x",
+    TextColor3 = WHITE,
+    TextSize = 19,
+    Font = Enum.Font.Gotham,
+    AutoButtonColor = false,
+    ZIndex = 250,
+}, Header)
+Corner(Close, 14)
+Stroke(Close, 0.86)
+
+Janitor:Add(Close.MouseEnter:Connect(function()
+    Animate(Close, { BackgroundColor3 = BLUE, BackgroundTransparency = 0.15 }, 0.15)
+end))
+Janitor:Add(Close.MouseLeave:Connect(function()
+    Animate(Close, { BackgroundColor3 = WHITE, BackgroundTransparency = 0.91 }, 0.15)
+end))
+
+local Body = Create("Frame", {
+    Name = "Body",
+    Size = UDim2.new(1, 0, 1, -72),
+    Position = UDim2.fromOffset(0, 72),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ZIndex = 20,
+}, Window)
+
+local Sidebar = Create("ScrollingFrame", {
+    Name = "Sidebar",
+    Size = UDim2.new(0, 155, 1, -18),
+    Position = UDim2.fromOffset(10, 9),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 0,
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    CanvasSize = UDim2.new(),
+    ZIndex = 30,
+}, Body)
+Create("UIPadding", {
+    PaddingTop = UDim.new(0, 3),
+    PaddingBottom = UDim.new(0, 8),
+}, Sidebar)
+Create("UIListLayout", {
+    Padding = UDim.new(0, 7),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, Sidebar)
+
+local Content = Create("Frame", {
+    Name = "Content",
+    Size = UDim2.new(1, -176, 1, -18),
+    Position = UDim2.fromOffset(169, 9),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ZIndex = 30,
+}, Body)
+
+--==================================================
+-- CANVAS SNOWFALL PARTICLE SYSTEM (Matcha Parallax — 3 capas de profundidad)
+--==================================================
+local MAX_COPOS       = 150
+local FRECUENCIA_COPO = 0.35   -- prob. por frame de generar un copo
+
+local coposActivos = {}
+local IsSnowing    = false
+local SnowEnabled  = true
+
+-- Template base para clonar copos (sin Parent para que no se muestre)
+local copoTemplate = Instance.new("Frame")
+copoTemplate.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+copoTemplate.BorderSizePixel  = 0
+local _tc = Instance.new("UICorner")
+_tc.CornerRadius = UDim.new(1, 0)
+_tc.Parent = copoTemplate
+
+local function SpawnSnowflake()
+    if not IsSnowing or #coposActivos >= MAX_COPOS then return end
+
+    local copo  = copoTemplate:Clone()
+    local capa  = math.random(1, 3)
+    local tamano, transparencia, velBase, zIdx
+
+    if capa == 1 then           -- Fondo lejano: pequeño, lento, tenue
+        tamano       = math.random(2, 3)
+        transparencia = math.random(6, 8) / 10
+        velBase      = math.random(40, 80)   / 10000
+        zIdx         = 2
+    elseif capa == 2 then       -- Capa media: estándar
+        tamano       = math.random(4, 5)
+        transparencia = math.random(3, 5) / 10
+        velBase      = math.random(90, 140)  / 10000
+        zIdx         = 3
+    else                        -- Primer plano: grande, rápido, nítido
+        tamano       = math.random(6, 8)
+        transparencia = math.random(1, 2) / 10
+        velBase      = math.random(160, 240) / 10000
+        zIdx         = 4
+    end
+
+    copo.Size                 = UDim2.new(0, tamano, 0, tamano)
+    copo.BackgroundTransparency = transparencia
+    copo.ZIndex               = zIdx
+    copo.Position             = UDim2.new(math.random(), 0, -0.05, 0)
+    copo.Parent               = SnowCanvas
+
+    table.insert(coposActivos, {
+        Instancia       = copo,
+        Y               = -0.05,
+        X               = copo.Position.X.Scale,
+        VelY            = velBase,
+        FrecuenciaViento = math.random(1, 4),
+        AmplitudViento  = math.random(5, 15) / 10000,
+        TiempoInterno   = math.random(0, 100),
+    })
+end
+
+local function UpdateSnowfall(dt)
+    if not IsSnowing and #coposActivos == 0 then return end
+
+    if IsSnowing and math.random() < FRECUENCIA_COPO then
+        SpawnSnowflake()
+    end
+
+    local velFrame = dt * 60
+    for i = #coposActivos, 1, -1 do
+        local d = coposActivos[i]
+        if d.Instancia and d.Instancia.Parent then
+            d.TiempoInterno = d.TiempoInterno + (dt * d.FrecuenciaViento)
+            d.Y = d.Y + (d.VelY * velFrame)
+            local seno = math.sin(d.TiempoInterno) * d.AmplitudViento
+            d.X = d.X + (seno * velFrame)
+            d.Instancia.Position = UDim2.new(d.X, 0, d.Y, 0)
+            if d.Y > 1.05 then
+                d.Instancia:Destroy()
+                table.remove(coposActivos, i)
+            end
+        else
+            table.remove(coposActivos, i)
+        end
+    end
+end
+
+local function ClearAllSnow()
+    IsSnowing = false
+    for _, d in ipairs(coposActivos) do
+        if d.Instancia then d.Instancia:Destroy() end
+    end
+    table.clear(coposActivos)
+end
+
+--==================================================
+-- HIGH-REFRESH RATE INPUT HANDLING
+--==================================================
+local State = {
+    Dragging = false,
+    DragStart = nil,
+    StartWindowPos = nil,
+    Resizing = false,
+    ResizeStart = nil,
+    StartWindowSize = nil,
+    Sliding = false,
+    CurrentSliderFill = nil,
+    CurrentSliderKnob = nil,
+    CurrentSliderLabel = nil,
+    CurrentSliderBar = nil,
+    CurrentSliderCallback = nil,
+    CurrentSliderValue = nil,
+    CurrentSliderKey = nil,
+    CurrentSliderApply = nil,
+}
+
+Janitor:Add(RunService.RenderStepped:Connect(function(dt)
+    UpdateSnowfall(dt)
+
+    local mousePos = UserInputService:GetMouseLocation()
+
+    if State.Dragging and State.DragStart and State.StartWindowPos then
+        local delta = mousePos - State.DragStart
+        local targetPos = UDim2.new(
+            State.StartWindowPos.X.Scale,
+            State.StartWindowPos.X.Offset + delta.X,
+            State.StartWindowPos.Y.Scale,
+            State.StartWindowPos.Y.Offset + delta.Y
+        )
+        Window.Position = FrameSafeLerp(Window.Position, targetPos, 0.35, dt)
+    end
+
+    if State.Resizing and State.ResizeStart and State.StartWindowSize then
+        local delta = mousePos - State.ResizeStart
+        local w = math.clamp(State.StartWindowSize.X + delta.X, MIN_WIDTH, MAX_WIDTH)
+        local h = math.clamp(State.StartWindowSize.Y + delta.Y, MIN_HEIGHT, MAX_HEIGHT)
+        Window.Size = UDim2.fromOffset(w, h)
+    end
+
+    if State.Sliding and State.CurrentSliderBar then
+        local bar = State.CurrentSliderBar
+        local width = bar.AbsoluteSize.X
+        if width > 0 then
+            local percent = math.clamp((mousePos.X - bar.AbsolutePosition.X) / width, 0, 1)
+            local value = math.round(percent * 100)
+            State.CurrentSliderFill.Size = FrameSafeLerp(State.CurrentSliderFill.Size, UDim2.new(percent, 0, 1, 0), 0.45, dt)
+            State.CurrentSliderKnob.Position = FrameSafeLerp(State.CurrentSliderKnob.Position, UDim2.new(percent, -8, 0.5, -8), 0.45, dt)
+            SetLocalizedText(State.CurrentSliderLabel, tostring(value) .. "%")
+            if State.CurrentSliderValue ~= value then
+                State.CurrentSliderValue = value
+                if State.CurrentSliderKey then AutoConfig:SetControl(State.CurrentSliderKey, value) end
+                if State.CurrentSliderCallback then
+                    local ok, err = pcall(State.CurrentSliderCallback, value)
+                    if not ok then warn("[ModernLiquidGlass] Slider callback error: " .. tostring(err)) end
+                end
+            end
+        end
+    end
+end))
+
+Janitor:Add(DragArea.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        State.Dragging = true
+        State.DragStart = UserInputService:GetMouseLocation()
+        State.StartWindowPos = Window.Position
+    end
+end))
+
+Janitor:Add(UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if State.Dragging or State.Resizing then
+            AutoConfig:SetSetting("WindowPosition", {
+                XScale = Window.Position.X.Scale, XOffset = Window.Position.X.Offset,
+                YScale = Window.Position.Y.Scale, YOffset = Window.Position.Y.Offset,
+            })
+            AutoConfig:SetSetting("WindowSize", {
+                XScale = Window.Size.X.Scale, XOffset = Window.Size.X.Offset,
+                YScale = Window.Size.Y.Scale, YOffset = Window.Size.Y.Offset,
+            })
+        end
+        State.Dragging = false
+        State.Resizing = false
+        State.Sliding = false
+    end
+end))
+
+--==================================================
+-- TABS & COMPONENT FACTORIES
+--==================================================
+local TabNames = {
+    "Dashboard",
+    "Buttons",
+    "Toggles",
+    "Sliders",
+    "Inputs",
+    "Dropdowns",
+    "Selectors",
+    "Lists",
+    "Cards",
+    "Visuals",
+    "Animations",
+    "Settings",
+    "Language",
+}
+
+local Pages, TabButtons = {}, {}
+
+local function makeControlKey(page, kind, label, customId)
+    return tostring(page.Name) .. "/" .. kind .. "/" .. tostring(customId or label)
+end
+
+local function checkedCallback(callback, value, label)
+    if not callback then return end
+    local ok, err = pcall(callback, value)
+    if not ok then warn("[ModernLiquidGlass] " .. tostring(label or "Control") .. " callback error: " .. tostring(err)) end
+end
+
+local function CreatePage(name)
+    local page = Create("ScrollingFrame", {
+        Name = name,
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 2,
+        ScrollBarImageColor3 = BLUE,
+        ScrollBarImageTransparency = 0.35,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(),
+        Visible = false,
+        ZIndex = 40,
+    }, Content)
+    Create("UIPadding", {
+        PaddingLeft = UDim.new(0, 5),
+        PaddingRight = UDim.new(0, 10),
+        PaddingTop = UDim.new(0, 2),
+        PaddingBottom = UDim.new(0, 20),
+    }, page)
+    Create("UIListLayout", {
+        Padding = UDim.new(0, 9),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, page)
+    Pages[name] = page
+    return page
+end
+
+for tabIndex, name in ipairs(TabNames) do
+    local button = Create("TextButton", {
+        Name = name,
+        Size = UDim2.new(1, -4, 0, 30),
+        BackgroundColor3 = WHITE,
+        BackgroundTransparency = 0.97,
+        BorderSizePixel = 0,
+        Text = name,
+        TextColor3 = Color3.fromRGB(205, 216, 232),
+        TextSize = 10,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        AutoButtonColor = false,
+        ZIndex = 50,
+        LayoutOrder = tabIndex,
+    }, Sidebar)
+    Corner(button, 10)
+    Stroke(button, 0.95)
+    Create("UIPadding", { PaddingLeft = UDim.new(0, 12) }, button)
+    TabButtons[name] = button
+    CreatePage(name)
+end
+
+local function SectionTitle(page, title, subtitle)
+    local holder = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, 50),
+        BackgroundTransparency = 1,
+    }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 25),
+        BackgroundTransparency = 1,
+        Text = title,
+        TextColor3 = WHITE,
+        TextSize = 17,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    Create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18),
+        Position = UDim2.fromOffset(0, 27),
+        BackgroundTransparency = 1,
+        Text = subtitle or "",
+        TextColor3 = TEXT_SECONDARY,
+        TextSize = 9,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    return holder
+end
+
+local function AddButton(page, text, callback)
+    local button = Create("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundColor3 = WHITE,
+        BackgroundTransparency = 0.96,
+        BorderSizePixel = 0,
+        Text = text,
+        TextColor3 = WHITE,
+        TextSize = 10,
+        Font = Enum.Font.GothamMedium,
+        AutoButtonColor = false,
+    }, page)
+    Corner(button, 10)
+    Stroke(button, 0.92)
+
+    local scale = Create("UIScale", { Scale = 1 }, button)
+
+    Janitor:Add(button.MouseEnter:Connect(function()
+        Animate(button, { BackgroundColor3 = BLUE, BackgroundTransparency = 0.45 }, 0.16)
+    end))
+    Janitor:Add(button.MouseLeave:Connect(function()
+        Animate(button, { BackgroundColor3 = WHITE, BackgroundTransparency = 0.96 }, 0.18)
+    end))
+    Janitor:Add(button.Activated:Connect(function()
+        Animate(scale, { Scale = 0.96 }, 0.07)
+        task.delay(0.07, function()
+            if button.Parent then
+                Animate(scale, { Scale = 1 }, 0.13)
+            end
+        end)
+        if callback then
+            callback()
+        end
+    end))
+
+    return button
+end
+
+local function AddToggle(page, text, default, callback, customId)
+    default = default == true
+    local key = makeControlKey(page, "Toggle", text, customId)
+    ControlDefaults[key] = default
+    local missing = {}
+    local saved = AutoConfig:GetControl(key, missing)
+    local hasSaved = saved ~= missing
+    if not hasSaved then saved = default end
+    local state = type(saved) == "boolean" and saved or default
+    local holder = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, 48),
+        BackgroundTransparency = 1,
+    }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, -60, 1, 0),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = WHITE,
+        TextSize = 10,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+
+    local switch = Create("TextButton", {
+        Size = UDim2.fromOffset(45, 25),
+        Position = UDim2.new(1, -45, 0.5, -12),
+        BackgroundColor3 = state and BLUE or Color3.fromRGB(58, 67, 82),
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+    }, holder)
+    Corner(switch, 20)
+    local dot = Create("Frame", {
+        Size = UDim2.fromOffset(19, 19),
+        Position = state and UDim2.new(1, -22, 0.5, -9) or UDim2.fromOffset(3, 3),
+        BackgroundColor3 = WHITE,
+        BorderSizePixel = 0,
+    }, switch)
+    Corner(dot, 20)
+
+    local function apply(value, invokeCallback, persist)
+        state = value == true
+        switch.BackgroundColor3 = state and BLUE or Color3.fromRGB(58, 67, 82)
+        dot.Position = state and UDim2.new(1, -22, 0.5, -9) or UDim2.fromOffset(3, 3)
+        if persist then AutoConfig:SetControl(key, state) end
+        if invokeCallback then checkedCallback(callback, state, "Toggle") end
+    end
+    ControlState[key] = function(value) if type(value) == "boolean" then apply(value, true, false) end end
+    apply(state, hasSaved, false)
+    Janitor:Add(switch.Activated:Connect(function()
+        state = not state
+        Animate(switch, { BackgroundColor3 = state and BLUE or Color3.fromRGB(58, 67, 82) }, 0.18)
+        Animate(dot, { Position = state and UDim2.new(1, -22, 0.5, -9) or UDim2.fromOffset(3, 3) }, 0.18)
+        AutoConfig:SetControl(key, state)
+        checkedCallback(callback, state, "Toggle")
+    end))
+    return holder
+end
+
+local function AddSlider(page, text, startingValue, callback, customId)
+    local key = makeControlKey(page, "Slider", text, customId)
+    ControlDefaults[key] = math.clamp(tonumber(startingValue) or 0, 0, 100)
+    local missing = {}
+    local stored = AutoConfig:GetControl(key, missing)
+    local hasSaved = stored ~= missing
+    local saved = tonumber(hasSaved and stored or startingValue) or tonumber(startingValue) or 0
+    local initialValue = math.clamp(saved, 0, 100)
+    local holder = Create("Frame", { Size = UDim2.new(1, 0, 0, 59), BackgroundTransparency = 1 }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, -60, 0, 20), BackgroundTransparency = 1, Text = text,
+        TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    local valueLabel = Create("TextLabel", {
+        Size = UDim2.fromOffset(55, 20), Position = UDim2.new(1, -55, 0, 0),
+        BackgroundTransparency = 1, Text = tostring(initialValue) .. "%", TextColor3 = BLUE_LIGHT,
+        TextSize = 10, Font = Enum.Font.GothamMedium, TextXAlignment = Enum.TextXAlignment.Right,
+    }, holder)
+    local bar = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, 6), Position = UDim2.fromOffset(0, 35),
+        BackgroundColor3 = Color3.fromRGB(57, 65, 79), BorderSizePixel = 0,
+    }, holder)
+    Corner(bar, 10)
+    local fill = Create("Frame", {
+        Size = UDim2.new(initialValue / 100, 0, 1, 0), BackgroundColor3 = BLUE, BorderSizePixel = 0,
+    }, bar)
+    Corner(fill, 10)
+    local knob = Create("Frame", {
+        Size = UDim2.fromOffset(16, 16), Position = UDim2.new(initialValue / 100, -8, 0.5, -8),
+        BackgroundColor3 = WHITE, BorderSizePixel = 0, ZIndex = 5,
+    }, bar)
+    Corner(knob, 20)
+    local hitbox = Create("TextButton", {
+        Size = UDim2.new(1, 24, 0, 34), Position = UDim2.new(0, -12, 0.5, -17),
+        BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 10,
+    }, bar)
+
+    local function apply(value, invokeCallback, persist)
+        value = math.clamp(math.round(tonumber(value) or initialValue), 0, 100)
+        fill.Size = UDim2.new(value / 100, 0, 1, 0)
+        knob.Position = UDim2.new(value / 100, -8, 0.5, -8)
+        SetLocalizedText(valueLabel, tostring(value) .. "%")
+        if persist then AutoConfig:SetControl(key, value) end
+        if invokeCallback then checkedCallback(callback, value, "Slider") end
+        return value
+    end
+    ControlState[key] = function(value) apply(value, true, false) end
+    apply(initialValue, hasSaved, false)
+    Janitor:Add(hitbox.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            State.Sliding = true
+            State.CurrentSliderBar = bar
+            State.CurrentSliderFill = fill
+            State.CurrentSliderKnob = knob
+            State.CurrentSliderLabel = valueLabel
+            State.CurrentSliderCallback = callback
+            State.CurrentSliderKey = key
+            State.CurrentSliderApply = apply
+            State.CurrentSliderValue = nil
+        end
+    end))
+    return holder
+end
+
+local function AddInput(page, title, placeholder, callback, customId)
+    local key = makeControlKey(page, "Input", title, customId)
+    ControlDefaults[key] = ""
+    local missing = {}
+    local restored = AutoConfig:GetControl(key, missing)
+    local hasSaved = restored ~= missing
+    if not hasSaved then restored = "" end
+    local holder = Create("Frame", { Size = UDim2.new(1, 0, 0, 67), BackgroundTransparency = 1 }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = title,
+        TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    local box = Create("TextBox", {
+        Size = UDim2.new(1, 0, 0, 39), Position = UDim2.fromOffset(0, 26),
+        BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, BorderSizePixel = 0,
+        Text = type(restored) == "string" and restored or "", PlaceholderText = placeholder,
+        PlaceholderColor3 = TEXT_SECONDARY, TextColor3 = WHITE, TextSize = 10,
+        Font = Enum.Font.Gotham, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    Corner(box, 11)
+    Stroke(box, 0.88)
+    Create("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }, box)
+    local function apply(value, invokeCallback, persist)
+        box.Text = tostring(value or "")
+        if persist then AutoConfig:SetControl(key, box.Text) end
+        if invokeCallback then checkedCallback(callback, box.Text, "Input") end
+    end
+    ControlState[key] = function(value) apply(value, true, false) end
+    Janitor:Add(box.Focused:Connect(function() Animate(box, { BackgroundColor3 = BLUE, BackgroundTransparency = 0.88 }, 0.15) end))
+    Janitor:Add(box.FocusLost:Connect(function()
+        Animate(box, { BackgroundColor3 = WHITE, BackgroundTransparency = 0.93 }, 0.15)
+        AutoConfig:SetControl(key, box.Text)
+        checkedCallback(callback, box.Text, "Input")
+    end))
+    if hasSaved then checkedCallback(callback, type(restored) == "string" and restored or "", "Input") end
+    return box
+end
+
+local function AddCard(page, title, description)
+    local card = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, 68),
+        BackgroundColor3 = WHITE,
+        BackgroundTransparency = 0.94,
+        BorderSizePixel = 0,
+    }, page)
+    Corner(card, 14)
+    Stroke(card, 0.9)
+
+    local accent = Create("Frame", {
+        Size = UDim2.fromOffset(3, 38),
+        Position = UDim2.fromOffset(9, 15),
+        BackgroundColor3 = BLUE,
+        BorderSizePixel = 0,
+    }, card)
+    Corner(accent, 5)
+
+    Create("TextLabel", {
+        Size = UDim2.new(1, -35, 0, 21),
+        Position = UDim2.fromOffset(22, 11),
+        BackgroundTransparency = 1,
+        Text = title,
+        TextColor3 = WHITE,
+        TextSize = 11,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, card)
+    Create("TextLabel", {
+        Size = UDim2.new(1, -35, 0, 25),
+        Position = UDim2.fromOffset(22, 33),
+        BackgroundTransparency = 1,
+        Text = description,
+        TextColor3 = TEXT_SECONDARY,
+        TextSize = 9,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, card)
+    return card
+end
+
+local function AddDropdown(page, title, options, default, callback, customId)
+    options = options or {}
+    local key = makeControlKey(page, "Dropdown", title, customId)
+    ControlDefaults[key] = default or options[1]
+    local missing = {}
+    local saved = AutoConfig:GetControl(key, missing)
+    local hasSaved = saved ~= missing
+    if not hasSaved then saved = default or options[1] end
+    local selected = default or options[1]
+    for _, option in ipairs(options) do if option == saved then selected = option break end end
+    local open = false
+    local holder = Create("Frame", { Size = UDim2.new(1, 0, 0, 70), BackgroundTransparency = 1, ClipsDescendants = false }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = title,
+        TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    local button = Create("TextButton", {
+        Size = UDim2.new(1, 0, 0, 39), Position = UDim2.fromOffset(0, 26),
+        BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, BorderSizePixel = 0,
+        Text = tostring(selected), TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, ZIndex = 60,
+    }, holder)
+    Corner(button, 11); Stroke(button, 0.88)
+    Create("UIPadding", { PaddingLeft = UDim.new(0, 12) }, button)
+    local menu = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, #options * 34 + 8), Position = UDim2.fromOffset(0, 70),
+        BackgroundColor3 = GLASS_LIGHT, BackgroundTransparency = 0.12, BorderSizePixel = 0,
+        Visible = false, ZIndex = 80,
+    }, holder)
+    Corner(menu, 12); Stroke(menu, 0.85)
+    Create("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, menu)
+    Create("UIPadding", {
+        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
+        PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4),
+    }, menu)
+    local function setOpen(nextOpen)
+        open = nextOpen
+        menu.Visible = open
+        holder.Size = open and UDim2.new(1, 0, 0, 78 + #options * 34) or UDim2.new(1, 0, 0, 70)
+    end
+    local function apply(value, invokeCallback, persist)
+        local valid = false
+        for _, option in ipairs(options) do if option == value then valid = true break end end
+        if not valid then return end
+        selected = value
+        SetLocalizedText(button, tostring(selected))
+        for _, child in ipairs(menu:GetChildren()) do
+            if child:IsA("TextButton") then child.BackgroundTransparency = child.Name == tostring(selected) and 0.82 or 1 end
+        end
+        if persist then AutoConfig:SetControl(key, selected) end
+        if invokeCallback then checkedCallback(callback, selected, "Dropdown") end
+    end
+    for _, option in ipairs(options) do
+        local item = Create("TextButton", {
+            Name = tostring(option), Size = UDim2.new(1, 0, 0, 32),
+            BackgroundColor3 = WHITE, BackgroundTransparency = option == selected and 0.82 or 1,
+            BorderSizePixel = 0, Text = tostring(option), TextColor3 = WHITE,
+            TextSize = 10, Font = Enum.Font.GothamMedium, AutoButtonColor = false, ZIndex = 81,
+        }, menu)
+        Corner(item, 8)
+        Janitor:Add(item.Activated:Connect(function()
+            apply(option, true, true)
+            setOpen(false)
+        end))
+    end
+    Janitor:Add(button.Activated:Connect(function() setOpen(not open) end))
+    ControlState[key] = function(value) apply(value, true, false) end
+    apply(selected, hasSaved, false)
+    return holder
+end
+
+local function AddSelector(page, title, options, default, callback, customId)
+    options = options or {}
+    local key = makeControlKey(page, "Selector", title, customId)
+    ControlDefaults[key] = default or options[1]
+    local missing = {}
+    local saved = AutoConfig:GetControl(key, missing)
+    local hasSaved = saved ~= missing
+    if not hasSaved then saved = default or options[1] end
+    local selected = default or options[1]
+    for _, option in ipairs(options) do if option == saved then selected = option break end end
+    local holder = Create("Frame", { Size = UDim2.new(1, 0, 0, 70), BackgroundTransparency = 1 }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = title,
+        TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    local row = Create("Frame", {
+        Size = UDim2.new(1, 0, 0, 39), Position = UDim2.fromOffset(0, 26),
+        BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, BorderSizePixel = 0,
+    }, holder)
+    Corner(row, 12); Stroke(row, 0.9)
+    Create("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, row)
+    Create("UIPadding", {
+        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
+        PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4),
+    }, row)
+    local chips = {}
+    local function paint()
+        for name, chip in pairs(chips) do
+            if name == selected then
+                chip.BackgroundColor3 = BLUE; chip.BackgroundTransparency = 0.15; chip.TextColor3 = WHITE
+            else
+                chip.BackgroundColor3 = WHITE; chip.BackgroundTransparency = 1; chip.TextColor3 = TEXT_SECONDARY
+            end
+        end
+    end
+    local function apply(value, invokeCallback, persist)
+        local valid = false
+        for _, option in ipairs(options) do if option == value then valid = true break end end
+        if not valid then return end
+        selected = value; paint()
+        if persist then AutoConfig:SetControl(key, selected) end
+        if invokeCallback then checkedCallback(callback, selected, "Selector") end
+    end
+    for _, option in ipairs(options) do
+        local chip = Create("TextButton", {
+            Name = tostring(option), Size = UDim2.new(1 / math.max(#options, 1), -4, 1, 0),
+            BackgroundTransparency = 1, BorderSizePixel = 0, Text = tostring(option),
+            TextColor3 = TEXT_SECONDARY, TextSize = 10, Font = Enum.Font.GothamMedium,
+            AutoButtonColor = false,
+        }, row)
+        Corner(chip, 8); chips[option] = chip
+        Janitor:Add(chip.Activated:Connect(function() apply(option, true, true) end))
+    end
+    ControlState[key] = function(value) apply(value, true, false) end
+    apply(selected, hasSaved, false)
+    return holder
+end
+
+local function AddList(page, items, callback, customId)
+    local rows = {}
+    local first = items and items[1]
+    local key = makeControlKey(page, "List", first and (first.id or first.Id or first.title) or "List", customId)
+    local function itemKey(item) return item.id or item.Id or item.title end
+    local missing = {}
+    local restored = AutoConfig:GetControl(key, missing)
+    local hasSaved = restored ~= missing
+    for _, item in ipairs(items or {}) do
+        local row = Create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 42),
+            BackgroundColor3 = WHITE,
+            BackgroundTransparency = 0.94,
+            BorderSizePixel = 0,
+            Text = "",
+            AutoButtonColor = false,
+        }, page)
+        Corner(row, 12)
+        Stroke(row, 0.9)
+        table.insert(rows, row)
+        Janitor:Add(row.Activated:Connect(function()
+            AutoConfig:SetControl(key, itemKey(item))
+            checkedCallback(callback, item, "List")
+        end))
+        Create("TextLabel", {
+            Size = UDim2.new(1, -80, 1, 0),
+            Position = UDim2.fromOffset(12, 0),
+            BackgroundTransparency = 1,
+            Text = item.title,
+            TextColor3 = WHITE,
+            TextSize = 10,
+            Font = Enum.Font.GothamMedium,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, row)
+        Create("TextLabel", {
+            Size = UDim2.fromOffset(70, 42),
+            Position = UDim2.new(1, -78, 0, 0),
+            BackgroundTransparency = 1,
+            Text = item.meta,
+            TextColor3 = TEXT_SECONDARY,
+            TextSize = 9,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Right,
+        }, row)
+    end
+    ControlState[key] = function(value)
+        for _, item in ipairs(items or {}) do
+            if itemKey(item) == value then
+                checkedCallback(callback, item, "List")
+                return
+            end
+        end
+    end
+    if hasSaved then ControlState[key](restored) end
+    return rows
+end
+
+--==================================================
+-- GLOBAL ACCENT AND CHROMATIC GLASS PICKER
+--==================================================
+local ApplyAccentColor
+local ApplyGlassAlpha
+local ColorPickerRefreshers = {}
+local OpacityRefreshers = {}
+local function colorToTable(color)
+    return { R = color.R, G = color.G, B = color.B }
+end
+
+ApplyAccentColor = function(color, persist)
+    if typeof(color) ~= "Color3" then return false end
+    local previousBlue, previousLight = BLUE, BLUE_LIGHT
+    BLUE = color
+    BLUE_LIGHT = color == DEFAULT_BLUE and DEFAULT_BLUE_LIGHT or color:Lerp(WHITE, 0.34)
+    for _, target in ipairs(ThemeTargets) do
+        local object = target.Object
+        if object and object.Parent then
+            local nextColor
+            if target.Kind == "accent" then nextColor = BLUE
+            elseif target.Kind == "light" then nextColor = BLUE_LIGHT
+            elseif target.Kind == "stroke" then nextColor = color:Lerp(WHITE, 0.64)
+            elseif target.Kind == "text" then nextColor = target.Base:Lerp(color, 0.16) end
+            if nextColor then pcall(function() object[target.Property] = nextColor end) end
+        end
+    end
+    if Screen and Screen.Parent then
+        for _, object in ipairs(Screen:GetDescendants()) do
+            pcall(function()
+                if object:IsA("GuiObject") and object.BackgroundColor3 == previousBlue then object.BackgroundColor3 = BLUE end
+                if object:IsA("GuiObject") and object.BackgroundColor3 == previousLight then object.BackgroundColor3 = BLUE_LIGHT end
+                if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+                    if object.TextColor3 == previousBlue then object.TextColor3 = BLUE end
+                    if object.TextColor3 == previousLight then object.TextColor3 = BLUE_LIGHT end
+                end
+                if object:IsA("UIStroke") and object.Color == previousLight then object.Color = color:Lerp(WHITE, 0.64) end
+            end)
+        end
+    end
+    if Window and Window.Parent then Window.BackgroundColor3 = GLASS:Lerp(color, 0.05) end
+    if GlassHighlight and GlassHighlight.Parent then GlassHighlight.BackgroundColor3 = color:Lerp(WHITE, 0.45) end
+    if TopLight and TopLight.Parent then TopLight.BackgroundColor3 = BLUE_LIGHT end
+    if LogoGlow and LogoGlow.Parent then LogoGlow.BackgroundColor3 = color end
+    if persist then AutoConfig:SetSetting("AccentColor", colorToTable(color)) end
+    return true
+end
+
+ApplyGlassAlpha = function(alpha, persist)
+    CurrentGlassAlpha = math.clamp(tonumber(alpha) or CurrentGlassAlpha, 0.2, 1)
+    if Window and Window.Parent then Window.BackgroundTransparency = 1 - CurrentGlassAlpha end
+    if GlassHighlight and GlassHighlight.Parent then
+        GlassHighlight.BackgroundTransparency = math.clamp(0.96 + ((0.82 - CurrentGlassAlpha) * 0.15), 0.9, 0.99)
+    end
+    if persist then AutoConfig:SetSetting("GlassAlpha", CurrentGlassAlpha) end
+end
+
+local function AddColorPicker(page, title, initialColor, callback)
+    local holder = Create("Frame", { Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1 }, page)
+    Create("TextLabel", {
+        Size = UDim2.new(1, -72, 1, 0), BackgroundTransparency = 1, Text = title,
+        TextColor3 = WHITE, TextSize = 10, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+    local color = typeof(initialColor) == "Color3" and initialColor or BLUE
+    local preview = Create("TextButton", {
+        Size = UDim2.fromOffset(54, 30), Position = UDim2.new(1, -54, 0.5, -15),
+        BackgroundColor3 = color, BorderSizePixel = 0, Text = "", AutoButtonColor = false,
+    }, holder)
+    Corner(preview, 10); Stroke(preview, 0.65, 1)
+
+    local popup = Create("Frame", {
+        Name = "ChromaticGlassPicker", AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(260, 330),
+        BackgroundColor3 = GLASS_LIGHT, BackgroundTransparency = 0.08,
+        BorderSizePixel = 0, Visible = false, ZIndex = 700,
+    }, Screen)
+    Corner(popup, 20); Stroke(popup, 0.45, 1)
+    Create("TextLabel", {
+        Size = UDim2.new(1, -50, 0, 25), Position = UDim2.fromOffset(14, 9),
+        BackgroundTransparency = 1, Text = "Color and glass opacity", TextColor3 = WHITE,
+        TextSize = 11, Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 701,
+    }, popup)
+    local close = Create("TextButton", {
+        Size = UDim2.fromOffset(28, 25), Position = UDim2.new(1, -38, 0, 8),
+        BackgroundTransparency = 1, Text = "×", TextColor3 = TEXT_SECONDARY,
+        TextSize = 20, Font = Enum.Font.Gotham, AutoButtonColor = false, ZIndex = 702,
+    }, popup)
+    Janitor:Add(close.Activated:Connect(function() popup.Visible = false end))
+
+    local wheel = Create("Frame", {
+        Size = UDim2.fromOffset(166, 166), Position = UDim2.fromOffset(47, 40),
+        BackgroundColor3 = GLASS, BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 701,
+    }, popup)
+    Corner(wheel, 100)
+    local hue, saturation, brightness = color:ToHSV()
+    local wheelDots = {}
+    local rings, sectors, center, radius = 8, 48, 83, 66
+    for ring = 1, rings do
+        local sat = ring / rings
+        for segment = 0, sectors - 1 do
+            local h = segment / sectors
+            local angle = h * math.pi * 2
+            local r = radius * sat
+            local dot = Create("Frame", {
+                Size = UDim2.fromOffset(7, 7),
+                Position = UDim2.fromOffset(center + math.cos(angle) * r - 3.5, center + math.sin(angle) * r - 3.5),
+                BackgroundColor3 = Color3.fromHSV(h, sat, brightness),
+                BorderSizePixel = 0, ZIndex = 703,
+            }, wheel)
+            Corner(dot, 4)
+            table.insert(wheelDots, { Object = dot, Hue = h, Saturation = sat })
+        end
+    end
+    local marker = Create("Frame", {
+        Size = UDim2.fromOffset(13, 13), Position = UDim2.fromOffset(center - 6.5, center - 6.5),
+        BackgroundColor3 = color, BackgroundTransparency = 0.1, BorderSizePixel = 0, ZIndex = 706,
+    }, wheel)
+    Corner(marker, 10); Stroke(marker, 0.03, 2)
+    local wheelHitbox = Create("TextButton", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "",
+        AutoButtonColor = false, Active = true, ZIndex = 705,
+    }, wheel)
+
+    local rangeDrag = nil
+    local wheelDrag = false
+    local ranges = {}
+    local function createRange(labelText, y, startValue, handler)
+        Create("TextLabel", {
+            Size = UDim2.new(1, -28, 0, 16), Position = UDim2.fromOffset(14, y),
+            BackgroundTransparency = 1, Text = labelText, TextColor3 = TEXT_SECONDARY,
+            TextSize = 9, Font = Enum.Font.GothamMedium, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 702,
+        }, popup)
+        local valueText = Create("TextLabel", {
+            Size = UDim2.fromOffset(38, 16), Position = UDim2.new(1, -52, 0, y),
+            BackgroundTransparency = 1, Text = tostring(math.round(startValue * 100)) .. "%",
+            TextColor3 = BLUE_LIGHT, TextSize = 9, Font = Enum.Font.GothamMedium,
+            TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 702,
+        }, popup)
+        local track = Create("Frame", {
+            Size = UDim2.new(1, -28, 0, 6), Position = UDim2.fromOffset(14, y + 22),
+            BackgroundColor3 = Color3.fromRGB(57, 65, 79), BorderSizePixel = 0, ZIndex = 702,
+        }, popup)
+        Corner(track, 5)
+        local fill = Create("Frame", {
+            Size = UDim2.new(startValue, 0, 1, 0), BackgroundColor3 = BLUE,
+            BorderSizePixel = 0, ZIndex = 703,
+        }, track)
+        Corner(fill, 5)
+        local hit = Create("TextButton", {
+            Size = UDim2.new(1, 0, 0, 22), Position = UDim2.new(0, 0, 0.5, -11),
+            BackgroundTransparency = 1, Text = "", AutoButtonColor = false, Active = true, ZIndex = 704,
+        }, track)
+        local function setValue(value)
+            value = math.clamp(value, 0, 1)
+            fill.Size = UDim2.new(value, 0, 1, 0)
+            SetLocalizedText(valueText, tostring(math.round(value * 100)) .. "%")
+            handler(value)
+        end
+        local function fromPosition(x)
+            local width = math.max(track.AbsoluteSize.X, 1)
+            setValue(math.clamp((x - track.AbsolutePosition.X) / width, 0, 1))
+        end
+        Janitor:Add(hit.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                rangeDrag = { Track = track, SetFromX = fromPosition }
+                fromPosition(UserInputService:GetMouseLocation().X)
+            end
+        end))
+        table.insert(ranges, { Fill = fill, ValueText = valueText, SetValue = setValue })
+    end
+
+    local function applyColor(shouldSave)
+        color = Color3.fromHSV(hue, saturation, brightness)
+        preview.BackgroundColor3 = color
+        marker.BackgroundColor3 = color
+        for _, dotData in ipairs(wheelDots) do
+            dotData.Object.BackgroundColor3 = Color3.fromHSV(dotData.Hue, dotData.Saturation, brightness)
+        end
+        ApplyAccentColor(color, shouldSave)
+        if callback then checkedCallback(callback, color, "Color picker") end
+    end
+    local function setWheelFromPosition(position)
+        local localX = position.X - wheel.AbsolutePosition.X - center
+        local localY = position.Y - wheel.AbsolutePosition.Y - center
+        local distance = math.sqrt(localX * localX + localY * localY)
+        hue = (math.atan2(localY, localX) / (math.pi * 2)) % 1
+        saturation = math.clamp(distance / radius, 0, 1)
+        marker.Position = UDim2.fromOffset(center + math.cos(hue * math.pi * 2) * radius * saturation - 6.5,
+            center + math.sin(hue * math.pi * 2) * radius * saturation - 6.5)
+        applyColor(true)
+    end
+    Janitor:Add(wheelHitbox.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            wheelDrag = true
+            setWheelFromPosition(UserInputService:GetMouseLocation())
+        end
+    end))
+    Janitor:Add(UserInputService.InputChanged:Connect(function(input)
+        if wheelDrag then
+            local position = input.UserInputType == Enum.UserInputType.Touch and Vector2.new(input.Position.X, input.Position.Y) or UserInputService:GetMouseLocation()
+            setWheelFromPosition(position)
+        elseif rangeDrag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            rangeDrag.SetFromX(UserInputService:GetMouseLocation().X)
+        end
+    end))
+    Janitor:Add(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            wheelDrag = false
+            rangeDrag = nil
+        end
+    end))
+    createRange("Brightness", 224, brightness, function(value)
+        brightness = value
+        applyColor(true)
+    end)
+    createRange("Opacity", 275, CurrentGlassAlpha, function(value)
+        ApplyGlassAlpha(value, true)
+        if callback then checkedCallback(callback, color, "Color picker") end
+    end)
+    local h, sat = color:ToHSV()
+    hue, saturation = h, sat
+    marker.Position = UDim2.fromOffset(center + math.cos(hue * math.pi * 2) * radius * saturation - 6.5,
+        center + math.sin(hue * math.pi * 2) * radius * saturation - 6.5)
+    table.insert(ColorPickerRefreshers, function(nextColor)
+        color = nextColor
+        hue, saturation, brightness = nextColor:ToHSV()
+        preview.BackgroundColor3 = nextColor
+        marker.BackgroundColor3 = nextColor
+        marker.Position = UDim2.fromOffset(center + math.cos(hue * math.pi * 2) * radius * saturation - 6.5,
+            center + math.sin(hue * math.pi * 2) * radius * saturation - 6.5)
+        for _, dotData in ipairs(wheelDots) do
+            dotData.Object.BackgroundColor3 = Color3.fromHSV(dotData.Hue, dotData.Saturation, brightness)
+        end
+        if ranges[1] then
+            ranges[1].Fill.Size = UDim2.new(brightness, 0, 1, 0)
+            SetLocalizedText(ranges[1].ValueText, tostring(math.round(brightness * 100)) .. "%")
+        end
+    end)
+    table.insert(OpacityRefreshers, function(nextAlpha)
+        if ranges[2] then
+            ranges[2].Fill.Size = UDim2.new(nextAlpha, 0, 1, 0)
+            SetLocalizedText(ranges[2].ValueText, tostring(math.round(nextAlpha * 100)) .. "%")
+        end
+    end)
+    Janitor:Add(preview.Activated:Connect(function() popup.Visible = not popup.Visible end))
+    if HasSavedAccent then applyColor(false) end
+    return holder
+end
+
+--==================================================
+-- POPULATING WORKSPACE PAGES
+--==================================================
+SectionTitle(Pages.Dashboard, "Dashboard", "Modern Premium Engine")
+AddCard(Pages.Dashboard, "Engine Status Active", "Systems operating at peak fluid framework.")
+AddButton(Pages.Dashboard, "Primary System Action")
+AddToggle(Pages.Dashboard, "Enable Canvas Overlays", true, function(on)
+    SnowEnabled = on
+    IsSnowing = on
+    if not on then
+        ClearAllSnow()
+        IsSnowing = false
+    end
+end)
+AddSlider(Pages.Dashboard, "System Responsiveness", 95)
+
+SectionTitle(Pages.Buttons, "Buttons", "Primary and secondary actions")
+AddButton(Pages.Buttons, "Ghost Action")
+AddButton(Pages.Buttons, "Confirm Change")
+AddButton(Pages.Buttons, "Secondary Confirm")
+
+SectionTitle(Pages.Toggles, "Toggles", "Boolean switches")
+AddToggle(Pages.Toggles, "Canvas Overlays", true)
+AddToggle(Pages.Toggles, "Motion Blur Trail", false)
+AddToggle(Pages.Toggles, "Live Telemetry", true)
+
+SectionTitle(Pages.Sliders, "Sliders", "Pointer captured fill")
+AddSlider(Pages.Sliders, "Master Volume", 40)
+AddSlider(Pages.Sliders, "Backdrop Blur", 22)
+AddSlider(Pages.Sliders, "Bloom Amount", 32)
+
+SectionTitle(Pages.Inputs, "Inputs", "Focus uses ice accent")
+AddInput(Pages.Inputs, "Display Name", "Operator")
+AddInput(Pages.Inputs, "Toggle Key", "G")
+AddInput(Pages.Inputs, "Session Note", "Write a short note")
+
+SectionTitle(Pages.Dropdowns, "Dropdowns", "Expand in-flow so they survive clipping")
+AddDropdown(Pages.Dropdowns, "Quality Preset", { "High", "Medium", "Low" }, "High")
+AddDropdown(Pages.Dropdowns, "Particle Renderer", { "Canvas", "DOM", "Off" }, "Canvas")
+AddDropdown(Pages.Dropdowns, "Window Anchor", { "Center", "Top Left", "Remember Last" }, "Center")
+
+SectionTitle(Pages.Selectors, "Selectors", "Segmented chips")
+AddSelector(Pages.Selectors, "Accent", { "Blue", "Ice", "Steel" }, "Blue")
+AddSelector(Pages.Selectors, "Density", { "Compact", "Comfort", "Airy" }, "Comfort")
+
+SectionTitle(Pages.Lists, "Lists", "Selectable module rows")
+AddList(Pages.Lists, {
+    { title = "Snowfall system", meta = "Fixed" },
+    { title = "Empty tab factory", meta = "Filled" },
+    { title = "Font.Builder crash", meta = "Patched" },
+    { title = "Yielding close tween", meta = "Async" },
+    { title = "Dead unload button", meta = "Wired" },
+})
+
+SectionTitle(Pages.Cards, "Cards", "Accent bar, frost fill, hairline edge")
+AddCard(Pages.Cards, "Liquid interpolation", "Drag uses frame-safe lerp so 144hz and 30hz feel the same.")
+AddCard(Pages.Cards, "Constraint-safe close", "UIScale closes the window instead of fighting MinSize.")
+AddCard(Pages.Cards, "Janitor actually runs", "Connections, blur, and the ScreenGui die together on unload.")
+
+SectionTitle(Pages.Visuals, "Visuals", "Atmosphere controls")
+AddToggle(Pages.Visuals, "Snowfall", true, function(on)
+    SnowEnabled = on
+    IsSnowing = on
+    if not on then
+        ClearAllSnow()
+    else
+        IsSnowing = true
+    end
+end)
+AddSlider(Pages.Visuals, "Snowflake Density", 55)
+AddSlider(Pages.Visuals, "Glass Tint", 82)
+
+SectionTitle(Pages.Animations, "Animations", "Interruptible tweens")
+AddButton(Pages.Animations, "Trigger Pulse")
+AddCard(Pages.Animations, "Press scale", "Buttons use UIScale 0.96 so the list layout does not jump.")
+
+SectionTitle(Pages.Settings, "Settings", "Interface Configuration")
+AddToggle(Pages.Settings, "Dynamic Keybind Active (G)", true, function(on)
+    if on then
+        ContextActionService:BindAction(TOGGLE_ACTION, function(_, inputState)
+            if inputState ~= Enum.UserInputState.Begin then
+                return
+            end
+            if UserInputService:GetFocusedTextBox() then
+                return
+            end
+            if Window.Visible then
+                CloseUI()
+            else
+                OpenUI()
+            end
+        end, false, (options.ToggleKey or Enum.KeyCode.G))
+    else
+        ContextActionService:UnbindAction(TOGGLE_ACTION)
+    end
+end)
+AddButton(Pages.Settings, "Safe-Unload Framework", function()
+    Unload()
+end)
+AddCard(Pages.Settings, "Auto-Config & Profiles", "Controls are autosaved to a local JSON file when writefile is available.")
+AddColorPicker(Pages.Settings, "Glass accent", BLUE)
+
+SectionTitle(Pages.Language, "Language", "Detected from Roblox account language; you can change it here.")
+AddCard(Pages.Language, "Interface Language", "Choose from the main Roblox player languages; custom dictionaries can be registered from code.")
+AddDropdown(Pages.Language, "Interface Language", Localization.GetNames(), Localization.GetName(CurrentLanguage), function(languageName)
+    local code = Localization.GetCodeForName(languageName)
+    CurrentLanguage = Localization.Normalize(code)
+    RefreshLocalization()
+    if not SuppressLanguagePersist then AutoConfig:SetSetting("Language", CurrentLanguage) end
+end, "PreferredLanguage")
+
+--==================================================
+-- RESIZE IMPLEMENTATION
+--==================================================
+local Resize = Create("TextButton", {
+    Name = "Resize",
+    Size = UDim2.fromOffset(34, 34),
+    Position = UDim2.new(1, -34, 1, -34),
+    BackgroundTransparency = 1,
+    Text = "",
+    TextColor3 = Color3.fromRGB(140, 170, 200),
+    TextSize = 18,
+    Font = Enum.Font.GothamBold,
+    AutoButtonColor = false,
+    ZIndex = 300,
+}, Window)
+
+Janitor:Add(Resize.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        State.Resizing = true
+        State.ResizeStart = UserInputService:GetMouseLocation()
+        State.StartWindowSize = Window.AbsoluteSize
+    end
+end))
+
+--==================================================
+-- TAB SELECTION NAVIGATION
+--==================================================
+local CurrentTab = nil
+
+local function SelectTab(name)
+    if CurrentTab == name then
+        return
+    end
+    CurrentTab = name
+
+    for tabName, button in pairs(TabButtons) do
+        if tabName == name then
+            Animate(button, { BackgroundColor3 = BLUE, BackgroundTransparency = 0.40 }, 0.18)
+            button.TextColor3 = WHITE
+        else
+            Animate(button, { BackgroundColor3 = WHITE, BackgroundTransparency = 0.97 }, 0.18)
+            button.TextColor3 = Color3.fromRGB(205, 216, 232)
+        end
+    end
+
+    for pageName, page in pairs(Pages) do
+        if pageName == name then
+            page.Visible = true
+            page.Position = UDim2.new(0, 12, 0, 0)
+            Animate(page, { Position = UDim2.new(0, 0, 0, 0) }, 0.22)
+        else
+            page.Visible = false
+        end
+    end
+end
+
+for name, button in pairs(TabButtons) do
+    Janitor:Add(button.Activated:Connect(function()
+        SelectTab(name)
+    end))
+    Janitor:Add(button.MouseEnter:Connect(function()
+        if CurrentTab ~= name then
+            Animate(button, { BackgroundTransparency = 0.92 }, 0.12)
+        end
+    end))
+    Janitor:Add(button.MouseLeave:Connect(function()
+        if CurrentTab ~= name then
+            Animate(button, { BackgroundTransparency = 0.97 }, 0.12)
+        end
+    end))
+end
+
+SelectTab("Dashboard")
+
+--==================================================
+-- MOBILE / PC RESPONSIVE LOGIC
+--==================================================
+local function Responsive()
+    local camera = workspace.CurrentCamera
+    if not camera then
+        return
+    end
+
+    local viewport = camera.ViewportSize
+    if viewport.X <= 700 then
+        Sidebar.Visible = false
+        Content.Position = UDim2.fromOffset(9, 8)
+        Content.Size = UDim2.new(1, -18, 1, -16)
+        if not State.Dragging and not State.Resizing then
+            Window.Size = UDim2.fromOffset(
+                math.clamp(viewport.X - 18, MIN_WIDTH, 500),
+                math.clamp(viewport.Y - 25, MIN_HEIGHT, 650)
+            )
+        end
+    else
+        Sidebar.Visible = true
+        Content.Position = UDim2.fromOffset(169, 9)
+        Content.Size = UDim2.new(1, -176, 1, -18)
+    end
+end
+
+if workspace.CurrentCamera then
+    Janitor:Add(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(Responsive))
+end
+Responsive()
+
+--==================================================
+-- OPEN BUTTON INTERFACE
+--==================================================
+local OpenButton = Create("TextButton", {
+    Name = "OpenButton",
+    Size = UDim2.fromOffset(54, 54),
+    Position = UDim2.new(0, 15, 0.5, -27),
+    BackgroundColor3 = GLASS,
+    BackgroundTransparency = 0.15,
+    BorderSizePixel = 0,
+    Text = "LG",
+    TextColor3 = WHITE,
+    TextSize = 14,
+    Font = Enum.Font.GothamBold,
+    Visible = false,
+    AutoButtonColor = false,
+    ZIndex = 500,
+}, Screen)
+Corner(OpenButton, 17)
+Stroke(OpenButton, 0.72)
+
+Janitor:Add(OpenButton.MouseEnter:Connect(function()
+    Animate(OpenButton, { BackgroundColor3 = BLUE, BackgroundTransparency = 0.15 }, 0.15)
+end))
+Janitor:Add(OpenButton.MouseLeave:Connect(function()
+    Animate(OpenButton, { BackgroundColor3 = GLASS, BackgroundTransparency = 0.15 }, 0.15)
+end))
+
+--==================================================
+-- OPEN / CLOSE TRANSITIONS & KEYBIND
+-- Close uses UIScale so UISizeConstraint does not fight a Size(0,0) tween.
+--==================================================
+local Transitioning = false
+
+function CloseUI()
+    if Transitioning or not Window.Visible then
+        return
+    end
+    Transitioning = true
+    State.Dragging = false
+    State.Resizing = false
+    State.Sliding = false
+
+    Animate(Blur, { Size = 0 }, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+    Animate(Window, { BackgroundTransparency = 1 }, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+    local tween = Animate(WindowScale, { Scale = 0.92 }, 0.22, Enum.EasingStyle.Quart, Enum.EasingDirection.In)
+
+    Janitor:Add(tween.Completed:Connect(function(playback)
+        if playback ~= Enum.PlaybackState.Completed then
+            return
+        end
+        Window.Visible = false
+        WindowScale.Scale = 1
+        Window.BackgroundTransparency = 1 - CurrentGlassAlpha
+        Blur.Enabled = false
+        ClearAllSnow()
+        OpenButton.Visible = true
+        OpenButton.Size = UDim2.fromOffset(0, 0)
+        Animate(OpenButton, { Size = UDim2.fromOffset(54, 54) }, 0.25, Enum.EasingStyle.Back)
+        Transitioning = false
+    end))
+end
+
+function OpenUI()
+    if Transitioning or Window.Visible then
+        return
+    end
+    Transitioning = true
+    OpenButton.Visible = false
+    Window.Visible = true
+    WindowScale.Scale = 0.92
+    Window.BackgroundTransparency = 1
+    Blur.Enabled = true
+    Blur.Size = 0
+    IsSnowing = SnowEnabled
+
+    Animate(Blur, { Size = 14 }, 0.14, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+    Animate(Window, { BackgroundTransparency = 1 - CurrentGlassAlpha }, 0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+    local tween = Animate(WindowScale, { Scale = 1 }, 0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+    Janitor:Add(tween.Completed:Connect(function(playback)
+        if playback ~= Enum.PlaybackState.Completed then
+            return
+        end
+        Responsive()
+        Transitioning = false
+    end))
+end
+
+function Unload()
+    ContextActionService:UnbindAction(TOGGLE_ACTION)
+    AutoConfig:SetSetting("WindowPosition", {
+        XScale = Window.Position.X.Scale, XOffset = Window.Position.X.Offset,
+        YScale = Window.Position.Y.Scale, YOffset = Window.Position.Y.Offset,
+    })
+    AutoConfig:SetSetting("WindowSize", {
+        XScale = Window.Size.X.Scale, XOffset = Window.Size.X.Offset,
+        YScale = Window.Size.Y.Scale, YOffset = Window.Size.Y.Offset,
+    })
+    AutoConfig:SaveNow()
+    Janitor:Clean()
+    ClearAllSnow()
+    if Screen then
+        Screen:Destroy()
+    end
+    if Blur then
+        Blur:Destroy()
+    end
+end
+
+Janitor:Add(Close.Activated:Connect(CloseUI))
+Janitor:Add(OpenButton.Activated:Connect(OpenUI))
+
+local function OnToggle(_, inputState)
+    if inputState ~= Enum.UserInputState.Begin then
+        return Enum.ContextActionResult.Pass
+    end
+    if UserInputService:GetFocusedTextBox() then
+        return Enum.ContextActionResult.Pass
+    end
+    if Window.Visible then
+        CloseUI()
+    else
+        OpenUI()
+    end
+    return Enum.ContextActionResult.Sink
+end
+
+ContextActionService:BindAction(TOGGLE_ACTION, OnToggle, false, (options.ToggleKey or Enum.KeyCode.G))
+Janitor:Add({
+    Disconnect = function()
+        ContextActionService:UnbindAction(TOGGLE_ACTION)
+    end,
+})
+
+-- Execution Startup Init
+Window.Visible = true
+OpenButton.Visible = false
+Blur.Enabled = true
+Blur.Size = 14
+IsSnowing = SnowEnabled
+
+--==================================================
+-- PUBLIC LIBRARY API (uses the original Liquid Glass design)
+--==================================================
+local controller = {
+    Name = GUI_NAME,
+    Screen = Screen,
+    Window = Window,
+    Blur = Blur,
+    OpenButton = OpenButton,
+    Pages = Pages,
+    Tabs = {},
+}
+
+local CreateSubTab
+local function makeTabApi(name, page)
+    local tab = { Name = name, Page = page, Window = controller, SubTabs = {} }
+    function tab:AddSection(title, subtitle) return SectionTitle(self.Page, title, subtitle) end
+    function tab:AddButton(text, callback) return AddButton(self.Page, text, callback) end
+    function tab:AddToggle(text, default, callback, id) return AddToggle(self.Page, text, default, callback, id) end
+    function tab:AddSlider(text, default, callback, id) return AddSlider(self.Page, text, default, callback, id) end
+    function tab:AddInput(title, placeholder, callback, id) return AddInput(self.Page, title, placeholder, callback, id) end
+    function tab:AddCard(title, description) return AddCard(self.Page, title, description) end
+    function tab:AddDropdown(title, options, default, callback, id) return AddDropdown(self.Page, title, options, default, callback, id) end
+    function tab:AddSelector(title, options, default, callback, id) return AddSelector(self.Page, title, options, default, callback, id) end
+    function tab:AddList(items, callback, id) return AddList(self.Page, items, callback, id) end
+    function tab:AddColorPicker(title, initialColor, callback) return AddColorPicker(self.Page, title, initialColor, callback) end
+    function tab:AddIconButton(text, iconName, callback, provider)
+        local button = AddButton(self.Page, text, callback)
+        local spec, err = IconRegistry.Resolve(provider or "Glyph", iconName)
+        if not spec then warn("[ModernLiquidGlass] " .. tostring(err)); return button end
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        Create("UIPadding", { PaddingLeft = UDim.new(0, 37) }, button)
+        if spec.Kind == "Image" then
+            Create("ImageLabel", { Size = UDim2.fromOffset(17, 17), Position = UDim2.new(0, 12, 0.5, -8),
+                BackgroundTransparency = 1, Image = spec.Value, ImageColor3 = BLUE_LIGHT, ZIndex = button.ZIndex + 1 }, button)
+        else
+            Create("TextLabel", { Size = UDim2.fromOffset(18, 20), Position = UDim2.new(0, 11, 0.5, -10),
+                BackgroundTransparency = 1, Text = spec.Value, TextColor3 = BLUE_LIGHT, TextSize = 15,
+                Font = Enum.Font.GothamBold, ZIndex = button.ZIndex + 1 }, button)
+        end
+        return button
+    end
+    function tab:CreateSubTab(subName) return CreateSubTab(self, subName) end
+    return tab
+end
+
+CreateSubTab = function(parentTab, subName)
+    subName = tostring(subName)
+    if parentTab.SubTabs[subName] then return parentTab.SubTabs[subName] end
+    if not parentTab._subTabHolder then
+        local holder = Create("Frame", {
+            Name = "SubTabs_" .. parentTab.Name, Size = UDim2.new(1, 0, 0, 340),
+            BackgroundTransparency = 1,
+        }, parentTab.Page)
+        local nav = Create("Frame", { Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1 }, holder)
+        Create("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, nav)
+        local content = Create("Frame", {
+            Position = UDim2.fromOffset(0, 38), Size = UDim2.new(1, 0, 1, -38),
+            BackgroundTransparency = 1, ClipsDescendants = true,
+        }, holder)
+        parentTab._subTabHolder, parentTab._subTabNav, parentTab._subTabContent = holder, nav, content
+    end
+    local nav = parentTab._subTabNav
+    local content = parentTab._subTabContent
+    local subPage = Create("ScrollingFrame", {
+        Name = parentTab.Name .. "_SubTab_" .. subName, Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2,
+        ScrollBarImageColor3 = BLUE, ScrollBarImageTransparency = 0.35,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(), Visible = false,
+    }, content)
+    Create("UIPadding", { PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 10) }, subPage)
+    Create("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, subPage)
+    local button = Create("TextButton", {
+        Name = subName, Size = UDim2.new(1, -5, 0, 30), BackgroundColor3 = WHITE,
+        BackgroundTransparency = 0.97, BorderSizePixel = 0, Text = subName,
+        TextColor3 = Color3.fromRGB(205, 216, 232), TextSize = 9,
+        Font = Enum.Font.GothamMedium, AutoButtonColor = false,
+    }, nav)
+    Corner(button, 9); Stroke(button, 0.94)
+    local selected = false
+    local function selectThis()
+        for existingName, childTab in pairs(parentTab.SubTabs) do
+            childTab.Page.Visible = existingName == subName
+            local childButton = childTab._navButton
+            if childButton then
+                childButton.BackgroundColor3 = existingName == subName and BLUE or WHITE
+                childButton.BackgroundTransparency = existingName == subName and 0.4 or 0.97
+            end
+        end
+    end
+    local subTab = makeTabApi(subName, subPage)
+    subTab._navButton = button
+    parentTab.SubTabs[subName] = subTab
+    local count = 0
+    for _ in pairs(parentTab.SubTabs) do count = count + 1 end
+    for _, childTab in pairs(parentTab.SubTabs) do
+        if childTab._navButton then childTab._navButton.Size = UDim2.new(1 / count, -5, 0, 30) end
+    end
+    Janitor:Add(button.Activated:Connect(selectThis))
+    Janitor:Add(button.MouseEnter:Connect(function()
+        if not subPage.Visible then Animate(button, { BackgroundTransparency = 0.9 }, 0.12) end
+    end))
+    Janitor:Add(button.MouseLeave:Connect(function()
+        if not subPage.Visible then Animate(button, { BackgroundTransparency = 0.97 }, 0.12) end
+    end))
+    if not selected then selectThis() end
+    return subTab
+end
+
+for name, page in pairs(Pages) do
+    controller.Tabs[name] = makeTabApi(name, page)
+end
+
+function controller:GetTab(name)
+    return self.Tabs[name]
+end
+
+function controller:GetPage(name)
+    return Pages[name]
+end
+
+function controller:CreateTab(name)
+    name = tostring(name)
+    if Pages[name] then return self.Tabs[name] end
+    local page = CreatePage(name)
+    local order = #TabNames + 1
+    for _ in pairs(self._extraTabs or {}) do order += 1 end
+    self._extraTabs = self._extraTabs or {}
+    self._extraTabs[name] = true
+    local button = Create("TextButton", {
+        Name = name,
+        Size = UDim2.new(1, -4, 0, 30),
+        BackgroundColor3 = WHITE,
+        BackgroundTransparency = 0.97,
+        BorderSizePixel = 0,
+        Text = name,
+        TextColor3 = Color3.fromRGB(205, 216, 232),
+        TextSize = 10,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        AutoButtonColor = false,
+        ZIndex = 50,
+        LayoutOrder = order,
+    }, Sidebar)
+    Corner(button, 10)
+    Stroke(button, 0.95)
+    Create("UIPadding", { PaddingLeft = UDim.new(0, 12) }, button)
+    TabButtons[name] = button
+    Janitor:Add(button.Activated:Connect(function() SelectTab(name) end))
+    Janitor:Add(button.MouseEnter:Connect(function()
+        if CurrentTab ~= name then Animate(button, { BackgroundTransparency = 0.92 }, 0.12) end
+    end))
+    Janitor:Add(button.MouseLeave:Connect(function()
+        if CurrentTab ~= name then Animate(button, { BackgroundTransparency = 0.97 }, 0.12) end
+    end))
+    local tab = makeTabApi(name, page)
+    self.Tabs[name] = tab
+    SelectTab(name)
+    return tab
+end
+
+function controller:SelectTab(name)
+    if not Pages[name] then return false end
+    SelectTab(name)
+    return true
+end
+
+function controller:SetVisible(visible)
+    if visible then OpenUI() else CloseUI() end
+end
+
+function controller:Toggle()
+    if Window.Visible then CloseUI() else OpenUI() end
+end
+
+function controller:Open() OpenUI() end
+function controller:Close() CloseUI() end
+function controller:Unload() Unload() end
+function controller:Destroy() Unload() end
+controller.ConfigManager = AutoConfig
+controller.StorageAvailable = AutoConfig.StorageAvailable
+controller.Localization = Localization
+
+function controller:SetLanguage(language, persist)
+    CurrentLanguage = ResolveLanguage(language)
+    local languageKey = makeControlKey(Pages.Language, "Dropdown", "Interface Language", "PreferredLanguage")
+    local setter = ControlState[languageKey]
+    if setter then
+        local previousSuppress = SuppressLanguagePersist
+        SuppressLanguagePersist = persist == false
+        setter(Localization.GetName(CurrentLanguage))
+        SuppressLanguagePersist = previousSuppress
+    else
+        RefreshLocalization()
+    end
+    if persist ~= false then AutoConfig:SetSetting("Language", CurrentLanguage) end
+    return CurrentLanguage
+end
+
+function controller:RegisterTranslations(language, dictionary)
+    local ok = Localization.RegisterTranslations(language, dictionary)
+    if ok then RefreshLocalization() end
+    return ok
+end
+
+function controller:RegisterIconProvider(name, resolver)
+    return IconRegistry.RegisterProvider(name, resolver)
+end
+
+function controller:CreateProfile(name, copyCurrent)
+    local ok, err = AutoConfig:CreateProfile(name, copyCurrent)
+    if not ok then return false, err end
+    if not copyCurrent then self:LoadProfile(name) end
+    return true
+end
+
+function controller:SaveProfile(name)
+    return AutoConfig:SaveProfile(name)
+end
+
+function controller:DeleteProfile(name)
+    local wasActive = AutoConfig:GetActiveProfile() == name
+    local ok, err = AutoConfig:DeleteProfile(name)
+    if ok and wasActive then self:LoadProfile("Default") end
+    return ok, err
+end
+
+function controller:GetProfiles()
+    return AutoConfig:GetProfileNames()
+end
+
+function controller:GetActiveProfile()
+    return AutoConfig:GetActiveProfile()
+end
+
+function controller:LoadProfile(name)
+    AutoConfig:SetSuspended(true)
+    local profile, err = AutoConfig:LoadProfile(name)
+    if not profile then AutoConfig:SetSuspended(false); return false, err end
+    for key, setter in pairs(ControlState) do
+        local value = profile.Controls and profile.Controls[key]
+        if value == nil then value = ControlDefaults[key] end
+        if value ~= nil then pcall(setter, value) end
+    end
+    local settings = profile.Settings or {}
+    local accent = colorFromTable(settings.AccentColor) or DefaultAccentColor
+    ApplyAccentColor(accent, false)
+    for _, refresh in ipairs(ColorPickerRefreshers) do pcall(refresh, accent) end
+    ApplyGlassAlpha(settings.GlassAlpha ~= nil and settings.GlassAlpha or options.GlassAlpha or 0.82, false)
+    for _, refresh in ipairs(OpacityRefreshers) do pcall(refresh, CurrentGlassAlpha) end
+    self:SetLanguage(settings.Language or options.Language or AccountLanguage, false)
+    local position = fromUDim2Data(settings.WindowPosition) or DefaultWindowPosition
+    local size = fromUDim2Data(settings.WindowSize) or DefaultWindowSize
+    Window.Position = position
+    Window.Size = size
+    AutoConfig:SetSuspended(false)
+    AutoConfig:SaveNow()
+    return true
+end
+
+function controller:SetSnowing(enabled)
+    SnowEnabled = enabled == true
+    IsSnowing = SnowEnabled
+    if not IsSnowing then ClearAllSnow() end
+end
+
+return controller
+
+end
+
+function LiquidGlassUI:CreateWindow(options)
+    return LiquidGlassUI.new(options)
+end
+-- Start the complete UI using the original Liquid Glass layout and colors.
+local review = LiquidGlassUI.new({
+    Name = "ModernLiquidGlassFullReview",
+    ConfigName = "ModernLiquidGlassFullReview",
+    Language = "en",
+})
+
+-- The library already creates its original Dashboard, Buttons, Toggles,
+-- Sliders, Inputs, Dropdowns, Selectors, Lists, Cards, Visuals, Animations,
+-- Settings, and Language tabs. This extra tab groups every public control.
+local reviewTab = review:CreateTab("Complete Review")
+local actions = reviewTab:CreateSubTab("Buttons")
+actions:AddSection("Button examples", "Actions and icon buttons")
+actions:AddButton("Primary action", function()
+    print("Primary action clicked")
+end)
+actions:AddButton("Secondary action", function()
+    print("Secondary action clicked")
+end)
+actions:AddIconButton("Icon action", "◆", function()
+    print("Icon action clicked")
+end, "Glyph")
+actions:AddCard("Button states", "Hover and press to preview the original button animation.")
+
+local controls = reviewTab:CreateSubTab("Controls")
+controls:AddSection("Interactive controls", "Values are saved by the library when storage is available")
+controls:AddToggle("Demo enabled", true, function(value)
+    print("Toggle:", value)
+end, "review.demo-enabled")
+controls:AddSlider("Intensity", 65, function(value)
+    print("Slider:", value)
+end, "review.intensity")
+controls:AddInput("Text input", "Type something", function(value)
+    print("Input:", value)
+end, "review.text-input")
+controls:AddDropdown("Quality", { "High", "Medium", "Low" }, "High", function(value)
+    print("Dropdown:", value)
+end, "review.quality")
+controls:AddSelector("Layout", { "Compact", "Comfort", "Airy" }, "Comfort", function(value)
+    print("Selector:", value)
+end, "review.layout")
+controls:AddList({
+    { id = "alpha", title = "First list item", meta = "Alpha" },
+    { id = "beta", title = "Second list item", meta = "Beta" },
+}, function(item)
+    print("List item:", item.title, item.id)
+end, "review.list")
+
+local appearance = reviewTab:CreateSubTab("Appearance")
+appearance:AddSection("Theme controls", "Color, glass and cards")
+appearance:AddColorPicker("Accent color", Color3.fromRGB(45, 145, 255), function(color)
+    print("Accent color:", color)
+end)
+appearance:AddCard("Original design", "Liquid Glass panel with blue accents, blur and rounded edges.")
+
+_G.ModernLiquidGlassFullReview = review
+return review
