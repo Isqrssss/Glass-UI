@@ -1,4 +1,4 @@
-![Vista principal de Modern Liquid Glass](docs/images/liquid-glass-overview.jpg)
+![Preview conceptual de Modern Liquid Glass](docs/images/liquid-glass-overview.jpg)
 
 # Modern Liquid Glass
 
@@ -6,7 +6,9 @@ Biblioteca de interfaz cliente para Roblox, basada en la UI Liquid Glass origina
 
 La ventana incluye navegación lateral, pestañas, controles interactivos y una capa de vidrio esmerilado. El aspecto predeterminado conserva la paleta y las proporciones de la UI original; el color de acento y la opacidad pueden ajustarse en ejecución.
 
-![Selector cromático de Modern Liquid Glass](docs/images/chromatic-picker.jpg)
+Las imágenes son previews conceptuales del estilo y los controles; la UI funcional se construye desde el código de la biblioteca al ejecutarse.
+
+![Preview conceptual del selector cromático](docs/images/chromatic-picker.jpg)
 
 ## Características
 
