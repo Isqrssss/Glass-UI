@@ -9,7 +9,7 @@ A Roblox client UI library based on the original Liquid Glass design: dark trans
 - Draggable, resizable window with tabs and subtabs.
 - Buttons, icon buttons, toggles, sliders, inputs, dropdowns, selectors, lists, cards, and a color picker.
 - JSON autosave and profiles when the runtime supports `writefile`, `readfile`, and `isfile`; otherwise, settings stay in memory.
-- Final **Language** tab with Roblox locale detection and 12 languages.
+- **Language** tab with Roblox locale detection and 12 languages.
 - Icon providers for glyphs, Roblox asset IDs, and custom resolvers.
 
 ![Conceptual color picker preview](docs/images/chromatic-picker.jpg)
