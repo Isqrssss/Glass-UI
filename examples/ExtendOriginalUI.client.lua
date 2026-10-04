@@ -1,0 +1,32 @@
+-- Ejemplo opcional: extiende la UI original mediante los factories del mismo diseño.
+-- No se incluye en FullReview.client.lua; ejecútalo solo si quieres probar una pestaña adicional.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Library = require(ReplicatedStorage:WaitForChild("ModernLiquidGlassLibrary"))
+local ui = Library.new()
+
+local tab = ui:CreateTab("Example")
+tab:AddSection("Controles originales", "Se dibujan con las fábricas del panel Liquid Glass")
+tab:AddButton("Acción de prueba", function()
+    print("Botón de ejemplo activado")
+end)
+tab:AddToggle("Opción de prueba", true, function(enabled)
+    print("Toggle:", enabled)
+end)
+tab:AddSlider("Nivel de prueba", 50, function(percent)
+    print("Slider:", percent)
+end)
+tab:AddInput("Nota", "Escribe una nota", function(text)
+    print("Input:", text)
+end)
+tab:AddCard("Tarjeta original", "Usa la misma barra de acento y jerarquía visual.")
+tab:AddDropdown("Calidad", { "High", "Medium", "Low" }, "High", function(value)
+    print("Dropdown:", value)
+end)
+tab:AddSelector("Acento", { "Blue", "Ice", "Steel" }, "Blue", function(value)
+    print("Selector:", value)
+end)
+tab:AddList({
+    { title = "Módulo de ejemplo", meta = "Demo" },
+}, function(item)
+    print("List item:", item.title)
+end)

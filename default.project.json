@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/rojo-project.json",
+  "name": "ModernLiquidGlassLibrary",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "ModernLiquidGlassLibrary": {
+        "$path": "src"
+      }
+    }
+  }
+}

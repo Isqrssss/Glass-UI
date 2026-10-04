@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rojo
+        uses: rojo-rbx/setup-rojo@v1
+        with:
+          version: "7.5.1"
+      - name: Build ModuleScript
+        run: |
+          mkdir -p dist
+          rojo build default.project.json --output dist/ModernLiquidGlassLibrary.rbxm
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModernLiquidGlassLibrary-rbxm
+          path: dist/ModernLiquidGlassLibrary.rbxm
